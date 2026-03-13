@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from unclaw.db.repositories import EventRepository
@@ -31,6 +32,110 @@ class Tracer:
     event_bus: EventBus
     event_repository: EventRepository | None = None
     persist_events: bool = True
+    runtime_log_path: Path | None = None
+
+    def trace_channel_started(
+        self,
+        *,
+        channel_name: str,
+        session_id: str | None = None,
+        model_profile_name: str | None = None,
+        thinking_enabled: bool | None = None,
+        extra_payload: dict[str, Any] | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {"channel_name": channel_name}
+        if model_profile_name is not None:
+            payload["model_profile_name"] = model_profile_name
+        if thinking_enabled is not None:
+            payload["thinking_enabled"] = thinking_enabled
+        if extra_payload:
+            payload.update(extra_payload)
+
+        self._emit(
+            session_id=session_id,
+            event_type="channel.started",
+            level=EventLevel.INFO,
+            message="Channel started.",
+            payload=payload,
+        )
+
+    def trace_session_started(
+        self,
+        *,
+        session_id: str,
+        title: str,
+        source: str,
+    ) -> None:
+        self._emit(
+            session_id=session_id,
+            event_type="session.started",
+            level=EventLevel.INFO,
+            message="Session started.",
+            payload={
+                "title": title,
+                "source": source,
+            },
+        )
+
+    def trace_session_selected(
+        self,
+        *,
+        session_id: str,
+        title: str,
+        reason: str,
+    ) -> None:
+        self._emit(
+            session_id=session_id,
+            event_type="session.selected",
+            level=EventLevel.INFO,
+            message="Session selected.",
+            payload={
+                "title": title,
+                "reason": reason,
+            },
+        )
+
+    def trace_model_profile_selected(
+        self,
+        *,
+        session_id: str | None,
+        model_profile_name: str,
+        provider: str,
+        model_name: str,
+        reason: str,
+    ) -> None:
+        self._emit(
+            session_id=session_id,
+            event_type="model.profile.selected",
+            level=EventLevel.INFO,
+            message="Model profile selected.",
+            payload={
+                "model_profile_name": model_profile_name,
+                "provider": provider,
+                "model_name": model_name,
+                "reason": reason,
+            },
+        )
+
+    def trace_thinking_changed(
+        self,
+        *,
+        session_id: str | None,
+        model_profile_name: str,
+        thinking_enabled: bool,
+        reason: str,
+    ) -> None:
+        self._emit(
+            session_id=session_id,
+            event_type="thinking.changed",
+            level=EventLevel.INFO,
+            message="Thinking mode changed.",
+            payload={
+                "model_profile_name": model_profile_name,
+                "thinking_enabled": thinking_enabled,
+                "reason": reason,
+            },
+        )
 
     def trace_runtime_started(
         self,
@@ -114,6 +219,86 @@ class Tracer:
             },
         )
 
+    def trace_assistant_reply_persisted(
+        self,
+        *,
+        session_id: str,
+        output_length: int,
+    ) -> None:
+        self._emit(
+            session_id=session_id,
+            event_type="assistant.reply.persisted",
+            level=EventLevel.INFO,
+            message="Assistant reply persisted.",
+            payload={
+                "output_length": output_length,
+            },
+        )
+
+    def trace_tool_started(
+        self,
+        *,
+        session_id: str | None,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> None:
+        self._emit(
+            session_id=session_id,
+            event_type="tool.started",
+            level=EventLevel.INFO,
+            message="Tool command started.",
+            payload={
+                "tool_name": tool_name,
+                "arguments": arguments,
+            },
+        )
+
+    def trace_tool_finished(
+        self,
+        *,
+        session_id: str | None,
+        tool_name: str,
+        success: bool,
+        output_length: int,
+        error: str | None = None,
+    ) -> None:
+        self._emit(
+            session_id=session_id,
+            event_type="tool.finished",
+            level=EventLevel.INFO if success else EventLevel.ERROR,
+            message=(
+                "Tool command finished successfully."
+                if success
+                else "Tool command failed."
+            ),
+            payload={
+                "tool_name": tool_name,
+                "success": success,
+                "output_length": output_length,
+                "error": error,
+            },
+        )
+
+    def trace_telegram_message_received(
+        self,
+        *,
+        session_id: str,
+        chat_id: int,
+        text_length: int,
+        is_command: bool,
+    ) -> None:
+        self._emit(
+            session_id=session_id,
+            event_type="telegram.message.received",
+            level=EventLevel.INFO,
+            message="Telegram message received.",
+            payload={
+                "chat_id": chat_id,
+                "text_length": text_length,
+                "is_command": is_command,
+            },
+        )
+
     def trace_model_failed(
         self,
         *,
@@ -153,6 +338,7 @@ class Tracer:
             created_at=created_at,
         )
         self.event_bus.publish(event)
+        self._append_runtime_log(event)
 
         if not self.persist_events or self.event_repository is None:
             return
@@ -166,9 +352,33 @@ class Tracer:
             created_at=created_at,
         )
 
+    def _append_runtime_log(self, event: TraceEvent) -> None:
+        if self.runtime_log_path is None:
+            return
+
+        try:
+            self.runtime_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.runtime_log_path.open("a", encoding="utf-8") as handle:
+                handle.write(_encode_runtime_log_event(event))
+                handle.write("\n")
+        except OSError:
+            return
+
 
 def _encode_payload(payload: dict[str, Any]) -> str | None:
     if not payload:
         return None
     return json.dumps(payload, sort_keys=True)
 
+
+def _encode_runtime_log_event(event: TraceEvent) -> str:
+    payload: dict[str, Any] = {
+        "created_at": event.created_at,
+        "level": event.level.value,
+        "event_type": event.event_type,
+        "message": event.message,
+        "session_id": event.session_id,
+    }
+    if event.payload:
+        payload["payload"] = event.payload
+    return json.dumps(payload, sort_keys=True)

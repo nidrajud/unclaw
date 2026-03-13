@@ -50,7 +50,9 @@ def build_parser() -> argparse.ArgumentParser:
             "Examples:\n"
             "  unclaw start\n"
             "  unclaw help\n"
+            "  unclaw logs\n"
             "  unclaw logs simple\n"
+            "  unclaw logs full\n"
             "  unclaw onboard\n"
             "  unclaw telegram\n"
             "  unclaw update"
@@ -76,7 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("help", help="Show the same help as `unclaw --help`.")
     logs_parser = subparsers.add_parser(
         "logs",
-        help="Show recent local runtime logs.",
+        help="Follow local runtime logs live.",
     )
     logs_parser.add_argument(
         "mode",

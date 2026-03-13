@@ -219,6 +219,14 @@ class TelegramBotChannel:
     def run(self) -> None:
         bot_profile = self.api_client.get_me()
         username = bot_profile.get("username", "<unknown>")
+        self.tracer.trace_channel_started(
+            channel_name="telegram",
+            model_profile_name=self.settings.app.default_model_profile,
+            extra_payload={
+                "polling_timeout_seconds": self.config.polling_timeout_seconds,
+                "username": username,
+            },
+        )
         LOGGER.info(
             "Telegram polling started for @%s with timeout=%ss",
             username,
@@ -287,6 +295,12 @@ class TelegramBotChannel:
         )
 
         normalized_text = text.strip()
+        self.tracer.trace_telegram_message_received(
+            session_id=active_session.id,
+            chat_id=chat_id,
+            text_length=len(normalized_text),
+            is_command=normalized_text.startswith("/"),
+        )
         if normalized_text.startswith("/"):
             self._handle_command(
                 chat_id=chat_id,
@@ -307,10 +321,21 @@ class TelegramBotChannel:
         if mapped_session_id is not None:
             mapped_session = self.session_manager.load_session(mapped_session_id)
             if mapped_session is not None:
-                return self.session_manager.switch_session(mapped_session.id)
+                active_session = self.session_manager.switch_session(mapped_session.id)
+                self.tracer.trace_session_selected(
+                    session_id=active_session.id,
+                    title=active_session.title,
+                    reason="telegram_chat",
+                )
+                return active_session
 
         session = self.session_manager.create_session(title=f"Telegram chat {chat_id}")
         self.session_store.bind_chat(chat_id=chat_id, session_id=session.id)
+        self.tracer.trace_session_started(
+            session_id=session.id,
+            title=session.title,
+            source="telegram_chat",
+        )
         return session
 
     def _get_command_handler(self, chat_id: int) -> CommandHandler:
@@ -322,6 +347,7 @@ class TelegramBotChannel:
             settings=self.settings,
             session_manager=self.session_manager,
             memory_manager=self.memory_manager,
+            tracer=self.tracer,
             allow_exit=False,
         )
         self.command_handlers[chat_id] = handler
@@ -344,7 +370,21 @@ class TelegramBotChannel:
         if result.list_tools:
             reply_text = _format_tool_list(self.tool_executor.list_tools())
         elif result.tool_call is not None:
-            reply_text = _format_tool_result(self.tool_executor.execute(result.tool_call))
+            session_id = self.session_manager.current_session_id
+            self.tracer.trace_tool_started(
+                session_id=session_id,
+                tool_name=result.tool_call.tool_name,
+                arguments=result.tool_call.arguments,
+            )
+            tool_result = self.tool_executor.execute(result.tool_call)
+            self.tracer.trace_tool_finished(
+                session_id=session_id,
+                tool_name=result.tool_call.tool_name,
+                success=tool_result.success,
+                output_length=len(tool_result.output_text),
+                error=tool_result.error,
+            )
+            reply_text = _format_tool_result(tool_result)
         elif result.should_exit:
             reply_text = "The Telegram bot keeps running. Use /help to see commands."
         else:
@@ -474,6 +514,16 @@ def main(project_root: Path | None = None) -> int:
         tracer = Tracer(
             event_bus=event_bus,
             event_repository=session_manager.event_repository,
+        )
+        tracer.runtime_log_path = (
+            settings.paths.log_file_path if settings.app.logging.file_enabled else None
+        )
+        tracer.trace_model_profile_selected(
+            session_id=None,
+            model_profile_name=settings.app.default_model_profile,
+            provider=settings.default_model.provider,
+            model_name=settings.default_model.model_name,
+            reason="startup",
         )
         tool_executor = ToolExecutor.with_default_tools()
         api_client = TelegramApiClient(bot_token=resolved_bot_token.value)

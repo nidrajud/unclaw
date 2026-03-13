@@ -14,6 +14,7 @@ from unclaw.settings import ModelProfile, Settings
 from unclaw.tools.contracts import ToolCall
 
 if TYPE_CHECKING:
+    from unclaw.logs.tracer import Tracer
     from unclaw.memory import MemoryManager
 
 
@@ -55,6 +56,7 @@ class CommandHandler:
     settings: Settings
     session_manager: SessionManager
     memory_manager: MemoryManager | None = None
+    tracer: Tracer | None = None
     current_model_profile_name: str | None = None
     thinking_enabled: bool | None = None
     allow_exit: bool = True
@@ -67,11 +69,16 @@ class CommandHandler:
                 f"Unknown model profile '{self.current_model_profile_name}'."
             )
 
-        if self.thinking_enabled is None:
-            self.thinking_enabled = self.settings.app.thinking.default_enabled
+        requested_thinking_enabled = (
+            self.settings.app.thinking.default_enabled
+            if self.thinking_enabled is None
+            else self.thinking_enabled
+        )
+        self.thinking_enabled = requested_thinking_enabled
 
-        if self.thinking_enabled and not self.current_model_profile.thinking_supported:
+        if requested_thinking_enabled and not self.current_model_profile.thinking_supported:
             self.thinking_enabled = False
+            self._trace_thinking_changed(reason=self._thinking_disabled_reason())
 
     @property
     def current_model_profile(self) -> ModelProfile:
@@ -138,6 +145,7 @@ class CommandHandler:
             return self._usage("/new")
 
         session = self.session_manager.create_session()
+        self._trace_session_started(session.id, session.title, source="command")
         return self._ok(
             f"Created and switched to session {session.id}.",
             f"Title: {session.title}",
@@ -161,6 +169,7 @@ class CommandHandler:
             return self._usage("/use <session_id>")
 
         session = self.session_manager.switch_session(arguments[0])
+        self._trace_session_selected(session.id, session.title, reason="command")
         return self._ok(
             f"Switched to session {session.id}.",
             f"Title: {session.title}",
@@ -221,16 +230,15 @@ class CommandHandler:
             )
 
         self.current_model_profile_name = profile_name
+        self._trace_model_profile_selected(profile, reason="command")
         lines = [
             f"Selected model profile: {profile.name}",
             f"Provider: {profile.provider} | Model: {profile.model_name}",
         ]
         if self.thinking_enabled and not profile.thinking_supported:
             self.thinking_enabled = False
-            lines.append(
-                f"Thinking mode was turned off because '{profile.name}' "
-                "does not support it."
-            )
+            lines.append(self._thinking_disabled_reason())
+            self._trace_thinking_changed(reason=self._thinking_disabled_reason())
 
         return self._ok(*lines)
 
@@ -238,10 +246,7 @@ class CommandHandler:
         if not arguments:
             lines = [f"Thinking mode: {self.thinking_label}"]
             if not self.current_model_profile.thinking_supported:
-                lines.append(
-                    f"Current model profile '{self.current_model_profile.name}' "
-                    "does not support thinking mode."
-                )
+                lines.append(self._thinking_unsupported_status_note())
             return self._ok(*lines)
 
         if len(arguments) != 1:
@@ -252,12 +257,12 @@ class CommandHandler:
             return self._usage("/think <on|off>")
 
         if value == "on" and not self.current_model_profile.thinking_supported:
-            return self._error(
-                f"Model profile '{self.current_model_profile.name}' "
-                "does not support thinking mode."
-            )
+            return self._error(self._thinking_enable_blocked_message())
 
+        previous_value = self.thinking_enabled
         self.thinking_enabled = value == "on"
+        if previous_value != self.thinking_enabled:
+            self._trace_thinking_changed(reason="command")
         return self._ok(f"Thinking mode: {self.thinking_label}")
 
     def _handle_tools(self, arguments: tuple[str, ...]) -> CommandResult:
@@ -330,6 +335,10 @@ class CommandHandler:
         ]
         if self.allow_exit:
             lines.append("/exit  Leave the terminal runtime.")
+            lines.append("")
+            lines.append(
+                "Tip: use 'unclaw logs simple' or 'unclaw logs full' in another terminal."
+            )
         return self._ok(*lines)
 
     def _handle_exit(self, arguments: tuple[str, ...]) -> CommandResult:
@@ -388,3 +397,70 @@ class CommandHandler:
 
     def _usage(self, usage_line: str) -> CommandResult:
         return self._error(f"Usage: {usage_line}")
+
+    def _thinking_disabled_reason(self) -> str:
+        profile = self.current_model_profile
+        if profile.name == "fast":
+            return "Thinking mode was turned off because fast mode does not support thinking."
+        return (
+            f"Thinking mode was turned off because model profile '{profile.name}' "
+            "does not support it."
+        )
+
+    def _thinking_unsupported_status_note(self) -> str:
+        profile = self.current_model_profile
+        if profile.name == "fast":
+            return "Fast mode does not support thinking."
+        return f"Model profile '{profile.name}' does not support thinking mode."
+
+    def _thinking_enable_blocked_message(self) -> str:
+        profile = self.current_model_profile
+        if profile.name == "fast":
+            return (
+                "Fast mode does not support thinking. "
+                "Switch to another model profile to turn it on."
+            )
+        return f"Model profile '{profile.name}' does not support thinking mode."
+
+    def _current_session_id(self) -> str | None:
+        current_session_id = getattr(self.session_manager, "current_session_id", None)
+        return current_session_id if isinstance(current_session_id, str) else None
+
+    def _trace_session_started(self, session_id: str, title: str, *, source: str) -> None:
+        if self.tracer is None:
+            return
+        self.tracer.trace_session_started(
+            session_id=session_id,
+            title=title,
+            source=source,
+        )
+
+    def _trace_session_selected(self, session_id: str, title: str, *, reason: str) -> None:
+        if self.tracer is None:
+            return
+        self.tracer.trace_session_selected(
+            session_id=session_id,
+            title=title,
+            reason=reason,
+        )
+
+    def _trace_model_profile_selected(self, profile: ModelProfile, *, reason: str) -> None:
+        if self.tracer is None:
+            return
+        self.tracer.trace_model_profile_selected(
+            session_id=self._current_session_id(),
+            model_profile_name=profile.name,
+            provider=profile.provider,
+            model_name=profile.model_name,
+            reason=reason,
+        )
+
+    def _trace_thinking_changed(self, *, reason: str) -> None:
+        if self.tracer is None:
+            return
+        self.tracer.trace_thinking_changed(
+            session_id=self._current_session_id(),
+            model_profile_name=self.current_model_profile.name,
+            thinking_enabled=self.thinking_enabled is True,
+            reason=reason,
+        )

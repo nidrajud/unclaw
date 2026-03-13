@@ -61,6 +61,9 @@ def test_telegram_main_uses_locally_stored_token_without_env(
             self.event_bus = event_bus
             self.event_repository = event_repository
 
+        def trace_model_profile_selected(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            return None
+
     class FakeToolExecutor:
         @classmethod
         def with_default_tools(cls):  # type: ignore[no-untyped-def]

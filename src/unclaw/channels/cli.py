@@ -53,11 +53,33 @@ def main(project_root: Path | None = None) -> int:
             event_bus=event_bus,
             event_repository=session_manager.event_repository,
         )
+        tracer.runtime_log_path = (
+            settings.paths.log_file_path if settings.app.logging.file_enabled else None
+        )
         tool_executor = ToolExecutor.with_default_tools()
         command_handler = CommandHandler(
             settings=settings,
             session_manager=session_manager,
             memory_manager=memory_manager,
+            tracer=tracer,
+        )
+        tracer.trace_channel_started(
+            channel_name="terminal",
+            session_id=current_session.id,
+            model_profile_name=command_handler.current_model_profile.name,
+            thinking_enabled=command_handler.thinking_enabled is True,
+        )
+        tracer.trace_session_selected(
+            session_id=current_session.id,
+            title=current_session.title,
+            reason="startup",
+        )
+        tracer.trace_model_profile_selected(
+            session_id=current_session.id,
+            model_profile_name=command_handler.current_model_profile.name,
+            provider=command_handler.current_model_profile.provider,
+            model_name=command_handler.current_model_profile.model_name,
+            reason="startup",
         )
     except UnclawError as exc:
         print(f"Failed to start Unclaw: {exc}", file=sys.stderr)
@@ -112,7 +134,21 @@ def run_cli(
                 _render_tool_list(tool_executor.list_tools())
                 continue
             if result.tool_call is not None:
-                _render_tool_result(tool_executor.execute(result.tool_call))
+                session = session_manager.ensure_current_session()
+                tracer.trace_tool_started(
+                    session_id=session.id,
+                    tool_name=result.tool_call.tool_name,
+                    arguments=result.tool_call.arguments,
+                )
+                tool_result = tool_executor.execute(result.tool_call)
+                tracer.trace_tool_finished(
+                    session_id=session.id,
+                    tool_name=result.tool_call.tool_name,
+                    success=tool_result.success,
+                    output_length=len(tool_result.output_text),
+                    error=tool_result.error,
+                )
+                _render_tool_result(tool_result)
                 continue
             _render_command_result(result)
             if result.should_exit:

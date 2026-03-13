@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,7 +11,7 @@ from unclaw.settings import load_settings
 def test_help_lists_enriched_commands_for_cli() -> None:
     handler = CommandHandler(
         settings=_load_repo_settings(),
-        session_manager=SimpleNamespace(),
+        session_manager=_build_session_manager(),
     )
 
     result = handler.handle("/help")
@@ -33,12 +34,16 @@ def test_help_lists_enriched_commands_for_cli() -> None:
     assert "/session  Show the current session state." in result.lines
     assert "/summary  Show the saved session summary." in result.lines
     assert "/exit  Leave the terminal runtime." in result.lines
+    assert (
+        "Tip: use 'unclaw logs simple' or 'unclaw logs full' in another terminal."
+        in result.lines
+    )
 
 
 def test_help_omits_exit_for_telegram() -> None:
     handler = CommandHandler(
         settings=_load_repo_settings(),
-        session_manager=SimpleNamespace(),
+        session_manager=_build_session_manager(),
         allow_exit=False,
     )
 
@@ -46,7 +51,109 @@ def test_help_omits_exit_for_telegram() -> None:
 
     assert result.status is CommandStatus.OK
     assert "/exit  Leave the terminal runtime." not in result.lines
+    assert (
+        "Tip: use 'unclaw logs simple' or 'unclaw logs full' in another terminal."
+        not in result.lines
+    )
+
+
+def test_fast_profile_forces_thinking_off_on_startup() -> None:
+    settings = _with_default_fast_and_thinking_enabled(_load_repo_settings())
+
+    handler = CommandHandler(
+        settings=settings,
+        session_manager=_build_session_manager(),
+    )
+
+    assert handler.current_model_profile_name == "fast"
+    assert handler.thinking_enabled is False
+
+
+def test_switching_to_fast_turns_thinking_off_cleanly() -> None:
+    handler = CommandHandler(
+        settings=_load_repo_settings(),
+        session_manager=_build_session_manager(),
+        current_model_profile_name="main",
+        thinking_enabled=True,
+    )
+
+    result = handler.handle("/model fast")
+
+    assert result.status is CommandStatus.OK
+    assert handler.current_model_profile_name == "fast"
+    assert handler.thinking_enabled is False
+    assert (
+        "Thinking mode was turned off because fast mode does not support thinking."
+        in result.lines
+    )
+
+
+def test_think_status_on_fast_explains_that_thinking_is_unsupported() -> None:
+    handler = CommandHandler(
+        settings=_load_repo_settings(),
+        session_manager=_build_session_manager(),
+        current_model_profile_name="fast",
+        thinking_enabled=False,
+    )
+
+    result = handler.handle("/think")
+
+    assert result.status is CommandStatus.OK
+    assert result.lines == (
+        "Thinking mode: off",
+        "Fast mode does not support thinking.",
+    )
+
+
+def test_think_on_fails_clearly_on_fast() -> None:
+    handler = CommandHandler(
+        settings=_load_repo_settings(),
+        session_manager=_build_session_manager(),
+        current_model_profile_name="fast",
+        thinking_enabled=False,
+    )
+
+    result = handler.handle("/think on")
+
+    assert result.status is CommandStatus.ERROR
+    assert handler.thinking_enabled is False
+    assert result.lines == (
+        "Fast mode does not support thinking. "
+        "Switch to another model profile to turn it on.",
+    )
+
+
+def test_switching_back_to_supported_model_keeps_thinking_off() -> None:
+    handler = CommandHandler(
+        settings=_load_repo_settings(),
+        session_manager=_build_session_manager(),
+        current_model_profile_name="main",
+        thinking_enabled=True,
+    )
+
+    assert handler.handle("/model fast").status is CommandStatus.OK
+
+    result = handler.handle("/model main")
+
+    assert result.status is CommandStatus.OK
+    assert handler.current_model_profile_name == "main"
+    assert handler.thinking_enabled is False
 
 
 def _load_repo_settings():
     return load_settings(project_root=Path(__file__).resolve().parents[1])
+
+
+def _build_session_manager() -> SimpleNamespace:
+    return SimpleNamespace(current_session_id="sess-current")
+
+
+def _with_default_fast_and_thinking_enabled(settings):
+    return replace(
+        settings,
+        app=replace(
+            settings.app,
+            default_model_profile="fast",
+            thinking=replace(settings.app.thinking, default_enabled=True),
+        ),
+    )

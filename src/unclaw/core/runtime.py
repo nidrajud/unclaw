@@ -33,6 +33,11 @@ def run_user_turn(
         event_bus=event_bus or EventBus(),
         event_repository=session_manager.event_repository,
     )
+    active_tracer.runtime_log_path = (
+        session_manager.settings.paths.log_file_path
+        if session_manager.settings.app.logging.file_enabled
+        else None
+    )
 
     selected_model_profile_name = command_handler.current_model_profile.name
     thinking_enabled = command_handler.thinking_enabled is True
@@ -88,6 +93,10 @@ def run_user_turn(
         MessageRole.ASSISTANT,
         assistant_reply,
         session_id=session.id,
+    )
+    active_tracer.trace_assistant_reply_persisted(
+        session_id=session.id,
+        output_length=len(assistant_reply),
     )
     return assistant_reply
 
