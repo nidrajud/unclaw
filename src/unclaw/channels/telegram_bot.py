@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -37,6 +38,10 @@ _TELEGRAM_CONFIG_FILE_NAME = "telegram.yaml"
 _TELEGRAM_API_BASE_URL = "https://api.telegram.org"
 _POLL_RETRY_DELAY_SECONDS = 3.0
 _MESSAGE_LIMIT = 4000
+DEFAULT_TELEGRAM_TOKEN_ENV_VAR = "TELEGRAM_BOT_TOKEN"
+
+_ENV_VAR_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_TELEGRAM_BOT_TOKEN_PATTERN = re.compile(r"^\d{6,}:[A-Za-z0-9_-]{20,}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +60,35 @@ class TelegramConfig:
 
 class TelegramApiError(UnclawError):
     """Raised when the Telegram Bot API request fails."""
+
+
+def is_probable_telegram_bot_token(value: str) -> bool:
+    """Heuristically detect pasted Telegram bot tokens."""
+
+    return bool(_TELEGRAM_BOT_TOKEN_PATTERN.fullmatch(value.strip()))
+
+
+def validate_telegram_token_env_var_name(value: str) -> str:
+    """Validate the config field that stores the Telegram token env var name."""
+
+    normalized = value.strip()
+    if not normalized:
+        raise ConfigurationError(
+            "Telegram setting 'bot_token_env_var' must be a non-empty string."
+        )
+    if is_probable_telegram_bot_token(normalized):
+        raise ConfigurationError(
+            "Telegram setting 'bot_token_env_var' must contain an environment "
+            "variable name such as TELEGRAM_BOT_TOKEN, not a pasted bot token. "
+            "Store the real token in that environment variable before running "
+            "`unclaw telegram`."
+        )
+    if not _ENV_VAR_NAME_PATTERN.fullmatch(normalized):
+        raise ConfigurationError(
+            "Telegram setting 'bot_token_env_var' must look like an environment "
+            "variable name such as TELEGRAM_BOT_TOKEN."
+        )
+    return normalized
 
 
 @dataclass(slots=True)
@@ -394,7 +428,9 @@ def load_telegram_config(settings: Settings) -> TelegramConfig:
     config_path = settings.paths.config_dir / _TELEGRAM_CONFIG_FILE_NAME
     payload = _load_yaml_mapping(config_path)
 
-    bot_token_env_var = _read_str(payload, "bot_token_env_var")
+    bot_token_env_var = validate_telegram_token_env_var_name(
+        _read_str(payload, "bot_token_env_var")
+    )
     polling_timeout_seconds = _read_int(payload, "polling_timeout_seconds", minimum=1)
     allowed_chat_ids = _read_allowed_chat_ids(payload.get("allowed_chat_ids"))
 

@@ -7,30 +7,53 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeAlias
+from typing import Protocol, TypeAlias
 
 import yaml
 
 from unclaw.bootstrap import bootstrap
-from unclaw.channels.telegram_bot import TelegramConfig, load_telegram_config
-from unclaw.errors import UnclawError
-from unclaw.settings import Settings
+from unclaw.channels.telegram_bot import (
+    DEFAULT_TELEGRAM_TOKEN_ENV_VAR,
+    TelegramConfig,
+    load_telegram_config,
+    validate_telegram_token_env_var_name,
+)
+from unclaw.errors import ConfigurationError, UnclawError
+from unclaw.settings import ModelProfile, Settings
 from unclaw.startup import (
-    build_banner,
+    OllamaStatus,
     find_missing_model_profiles,
     inspect_ollama,
     ollama_install_guidance,
-    OllamaStatus,
     start_ollama_server,
     wait_for_ollama,
 )
+
+try:
+    import questionary
+except ImportError:  # pragma: no cover - exercised in environments without the UX dependency.
+    questionary = None
 
 InputFunc: TypeAlias = Callable[[str], str]
 OutputFunc: TypeAlias = Callable[[str], None]
 
 _AVAILABLE_CHANNELS = ("terminal", "telegram")
 _PROFILE_ORDER = ("fast", "main", "deep", "codex")
-_DEFAULT_TELEGRAM_TOKEN_ENV_VAR = "TELEGRAM_BOT_TOKEN"
+
+_PROFILE_DESCRIPTIONS = {
+    "fast": "Quick replies and lighter local hardware usage.",
+    "main": "Best default for most conversations and tool work.",
+    "deep": "Stronger reasoning when extra latency is acceptable.",
+    "codex": "Code-heavy work such as repositories, scripts, and fixes.",
+}
+
+_ONBOARDING_WORDMARK = (
+    " _   _ _   _  ____ _        ___        __",
+    "| | | | \\ | |/ ___| |      / _ \\ \\      / /",
+    "| | | |  \\| | |   | |     | | | |\\ \\ /\\ / / ",
+    "| |_| | |\\  | |___| |___  | |_| | \\ V  V /  ",
+    " \\___/|_| \\_|\\____|_____|  \\___/   \\_/\\_/   ",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,24 +82,339 @@ class OnboardingPlan:
     telegram_polling_timeout_seconds: int
 
 
+@dataclass(frozen=True, slots=True)
+class MenuOption:
+    """One selectable onboarding option."""
+
+    value: str
+    label: str
+    description: str | None = None
+
+
+class PromptUI(Protocol):
+    """Minimal prompt surface shared by interactive and fallback onboarding UIs."""
+
+    interactive: bool
+
+    def section(self, title: str, description: str | None = None) -> None:
+        ...
+
+    def info(self, message: str = "") -> None:
+        ...
+
+    def confirm(
+        self,
+        prompt: str,
+        *,
+        default: bool,
+        help_text: str | None = None,
+    ) -> bool:
+        ...
+
+    def select(
+        self,
+        prompt: str,
+        *,
+        options: tuple[MenuOption, ...],
+        default: str,
+        help_text: str | None = None,
+    ) -> str:
+        ...
+
+    def checkbox(
+        self,
+        prompt: str,
+        *,
+        options: tuple[MenuOption, ...],
+        default_values: tuple[str, ...],
+        help_text: str | None = None,
+    ) -> tuple[str, ...]:
+        ...
+
+    def text(
+        self,
+        prompt: str,
+        *,
+        default: str,
+        help_text: str | None = None,
+        validator: Callable[[str], str | None] | None = None,
+    ) -> str:
+        ...
+
+
+@dataclass(slots=True)
+class FallbackPromptUI:
+    """Readable plain-text onboarding prompts used in tests and non-TTY flows."""
+
+    input_func: InputFunc
+    output_func: OutputFunc
+    interactive: bool = False
+
+    def section(self, title: str, description: str | None = None) -> None:
+        self.output_func("")
+        self.output_func(f"[ {title} ]")
+        if description:
+            self.output_func(description)
+
+    def info(self, message: str = "") -> None:
+        self.output_func(message)
+
+    def confirm(
+        self,
+        prompt: str,
+        *,
+        default: bool,
+        help_text: str | None = None,
+    ) -> bool:
+        if help_text:
+            self.output_func(help_text)
+
+        suffix = "[Y/n]" if default else "[y/N]"
+        while True:
+            response = self.input_func(f"{prompt} {suffix} ").strip().lower()
+            if not response:
+                return default
+            if response in {"y", "yes"}:
+                return True
+            if response in {"n", "no"}:
+                return False
+            self.output_func("Please answer yes or no.")
+
+    def select(
+        self,
+        prompt: str,
+        *,
+        options: tuple[MenuOption, ...],
+        default: str,
+        help_text: str | None = None,
+    ) -> str:
+        default_value = _resolve_select_default(options=options, default=default)
+        if help_text:
+            self.output_func(help_text)
+        self.output_func(prompt)
+
+        default_index = 1
+        for index, option in enumerate(options, start=1):
+            if option.value == default_value:
+                default_index = index
+            suffix = f" - {option.description}" if option.description else ""
+            self.output_func(f"  {index}. {option.label}{suffix}")
+
+        while True:
+            response = self.input_func(f"Select an option [{default_index}] ").strip()
+            if not response:
+                return default_value
+            if response.isdigit():
+                choice_index = int(response)
+                if 1 <= choice_index <= len(options):
+                    return options[choice_index - 1].value
+
+            normalized = response.lower()
+            for option in options:
+                if normalized == option.value.lower():
+                    return option.value
+            self.output_func("Choose one of the listed options.")
+
+    def checkbox(
+        self,
+        prompt: str,
+        *,
+        options: tuple[MenuOption, ...],
+        default_values: tuple[str, ...],
+        help_text: str | None = None,
+    ) -> tuple[str, ...]:
+        while True:
+            if help_text:
+                self.output_func(help_text)
+            self.output_func(prompt)
+
+            selected_values: list[str] = []
+            default_lookup = set(default_values)
+            for option in options:
+                enabled = self.confirm(
+                    f"Enable {option.label}?",
+                    default=option.value in default_lookup,
+                    help_text=option.description,
+                )
+                if enabled:
+                    selected_values.append(option.value)
+
+            ordered_values = tuple(
+                option.value for option in options if option.value in selected_values
+            )
+            if ordered_values:
+                return ordered_values
+            self.output_func("Choose at least one option.")
+
+    def text(
+        self,
+        prompt: str,
+        *,
+        default: str,
+        help_text: str | None = None,
+        validator: Callable[[str], str | None] | None = None,
+    ) -> str:
+        if help_text:
+            self.output_func(help_text)
+
+        prompt_suffix = f" [{default}]" if default.strip() else ""
+        while True:
+            response = self.input_func(f"{prompt}{prompt_suffix} ").strip()
+            value = response or default.strip()
+            if not value:
+                self.output_func("This value cannot be empty.")
+                continue
+
+            if validator is not None:
+                error_message = validator(value)
+                if error_message is not None:
+                    self.output_func(error_message)
+                    continue
+            return value
+
+
+@dataclass(slots=True)
+class InteractivePromptUI:
+    """Menu-driven onboarding prompts backed by questionary."""
+
+    output_func: OutputFunc
+    interactive: bool = True
+
+    def section(self, title: str, description: str | None = None) -> None:
+        self.output_func("")
+        self.output_func(f"[ {title} ]")
+        if description:
+            self.output_func(description)
+
+    def info(self, message: str = "") -> None:
+        self.output_func(message)
+
+    def confirm(
+        self,
+        prompt: str,
+        *,
+        default: bool,
+        help_text: str | None = None,
+    ) -> bool:
+        if help_text:
+            self.output_func(help_text)
+        answer = questionary.confirm(prompt, default=default).ask()
+        if answer is None:
+            raise KeyboardInterrupt
+        return answer
+
+    def select(
+        self,
+        prompt: str,
+        *,
+        options: tuple[MenuOption, ...],
+        default: str,
+        help_text: str | None = None,
+    ) -> str:
+        if help_text:
+            self.output_func(help_text)
+
+        default_value = _resolve_select_default(options=options, default=default)
+        answer = questionary.select(
+            prompt,
+            choices=[
+                questionary.Choice(
+                    title=_render_menu_title(option),
+                    value=option.value,
+                )
+                for option in options
+            ],
+            default=default_value,
+            instruction="Use arrow keys, then press Enter.",
+        ).ask()
+        if answer is None:
+            raise KeyboardInterrupt
+        return answer
+
+    def checkbox(
+        self,
+        prompt: str,
+        *,
+        options: tuple[MenuOption, ...],
+        default_values: tuple[str, ...],
+        help_text: str | None = None,
+    ) -> tuple[str, ...]:
+        if help_text:
+            self.output_func(help_text)
+
+        default_lookup = set(default_values)
+        while True:
+            answer = questionary.checkbox(
+                prompt,
+                choices=[
+                    questionary.Choice(
+                        title=_render_menu_title(option),
+                        value=option.value,
+                        checked=option.value in default_lookup,
+                    )
+                    for option in options
+                ],
+                instruction="Use arrow keys to move, Space to toggle, Enter to confirm.",
+            ).ask()
+            if answer is None:
+                raise KeyboardInterrupt
+
+            ordered_values = tuple(
+                option.value for option in options if option.value in set(answer)
+            )
+            if ordered_values:
+                return ordered_values
+            self.output_func("Choose at least one option.")
+
+    def text(
+        self,
+        prompt: str,
+        *,
+        default: str,
+        help_text: str | None = None,
+        validator: Callable[[str], str | None] | None = None,
+    ) -> str:
+        while True:
+            if help_text:
+                self.output_func(help_text)
+            answer = questionary.text(
+                prompt,
+                default=default,
+                instruction="Press Enter to confirm.",
+            ).ask()
+            if answer is None:
+                raise KeyboardInterrupt
+
+            value = answer.strip() or default.strip()
+            if not value:
+                self.output_func("This value cannot be empty.")
+                continue
+            if validator is not None:
+                error_message = validator(value)
+                if error_message is not None:
+                    self.output_func(error_message)
+                    continue
+            return value
+
+
 _RECOMMENDED_PROFILES: dict[str, ModelProfileDraft] = {
     "fast": ModelProfileDraft(
         provider="ollama",
-        model_name="llama3.2:3b",
+        model_name="qwen3:1.7b",
         temperature=0.2,
         thinking_supported=False,
         tool_mode="json_plan",
     ),
     "main": ModelProfileDraft(
         provider="ollama",
-        model_name="qwen2.5:7b",
+        model_name="qwen3:4b",
         temperature=0.3,
         thinking_supported=True,
         tool_mode="json_plan",
     ),
     "deep": ModelProfileDraft(
         provider="ollama",
-        model_name="qwen2.5:14b",
+        model_name="qwen3:8b",
         temperature=0.2,
         thinking_supported=True,
         tool_mode="json_plan",
@@ -89,6 +427,45 @@ _RECOMMENDED_PROFILES: dict[str, ModelProfileDraft] = {
         tool_mode="json_plan",
     ),
 }
+
+_SETUP_MODE_OPTIONS = (
+    MenuOption(
+        value="recommended",
+        label="Recommended setup",
+        description="Guided flow with practical local-first defaults.",
+    ),
+    MenuOption(
+        value="advanced",
+        label="Advanced setup",
+        description="Choose channels, logging, and each model profile manually.",
+    ),
+)
+
+_LOGGING_OPTIONS = (
+    MenuOption(
+        value="simple",
+        label="Simple logs",
+        description="Cleaner startup output for everyday use.",
+    ),
+    MenuOption(
+        value="full",
+        label="Full logs",
+        description="More runtime detail while you are testing or debugging.",
+    ),
+)
+
+_CHANNEL_OPTIONS = (
+    MenuOption(
+        value="terminal",
+        label="Terminal chat",
+        description="Talk to Unclaw directly in this shell.",
+    ),
+    MenuOption(
+        value="telegram",
+        label="Telegram bot",
+        description="Reply from Telegram after you export a bot token.",
+    ),
+)
 
 
 def main(project_root: Path | None = None) -> int:
@@ -113,92 +490,82 @@ def run_onboarding(
 ) -> int:
     """Run the interactive onboarding flow with injectable I/O for tests."""
 
-    telegram_config = _load_existing_telegram_config(settings)
+    prompt_ui = _build_prompt_ui(input_func=input_func, output_func=output_func)
+    telegram_config, telegram_warning = _load_existing_telegram_config(settings)
     ollama_status = inspect_ollama()
 
     output_func(
-        build_banner(
-            title="Unclaw onboarding",
-            subtitle="Friendly local-first setup for terminal and Telegram.",
-            rows=(
-                ("project", str(settings.paths.project_root)),
-                ("config", str(settings.paths.config_dir)),
-                (
-                    "ollama",
-                    _describe_ollama_status(ollama_status),
-                ),
-            ),
-        )
+        _build_onboarding_banner(settings=settings, ollama_status=ollama_status)
     )
-    output_func("This will update your local config files in place.")
-    output_func("")
+    output_func("This setup updates your local config files in place.")
+    if prompt_ui.interactive:
+        output_func("Use arrow keys to move, Space to toggle selections, and Enter to confirm.")
+    if telegram_warning is not None:
+        output_func(telegram_warning)
 
-    beginner_mode = _prompt_yes_no(
-        "Do you want beginner-friendly guided setup?",
-        default=True,
-        input_func=input_func,
-        output_func=output_func,
+    prompt_ui.section(
+        "Setup style",
+        "Choose how much Unclaw should decide for you during first-time setup.",
     )
-    automatic_configuration = _prompt_yes_no(
-        "Should Unclaw use automatic recommended configuration where possible?",
-        default=beginner_mode,
-        input_func=input_func,
-        output_func=output_func,
+    setup_mode = prompt_ui.select(
+        "How do you want to configure Unclaw?",
+        options=_SETUP_MODE_OPTIONS,
+        default="recommended",
     )
-    logging_mode = _prompt_choice(
-        "Choose the logging style",
-        options=("simple", "full"),
-        default=settings.app.logging.mode,
-        input_func=input_func,
-        output_func=output_func,
+    beginner_mode = setup_mode == "recommended"
+    automatic_configuration = beginner_mode or prompt_ui.confirm(
+        "Prefer automatic help for starting Ollama and pulling missing models later?",
+        default=False,
+        help_text=(
+            "This only changes the default answer for later setup steps. "
+            "You still confirm each action."
+        ),
+    )
+
+    prompt_ui.section(
+        "Logging",
+        "Choose how much runtime detail you want during startup and normal use.",
+    )
+    logging_mode = prompt_ui.select(
+        "Which live log style should Unclaw use?",
+        options=_LOGGING_OPTIONS,
+        default="simple" if beginner_mode else settings.app.logging.mode,
+    )
+
+    prompt_ui.section(
+        "Channels",
+        "Select where you want to interact with Unclaw.",
     )
     enabled_channels = _prompt_channels(
+        prompt_ui=prompt_ui,
         default_channels=_default_channels(settings),
-        input_func=input_func,
-        output_func=output_func,
     )
 
-    if beginner_mode and automatic_configuration:
-        use_recommended_profiles = _prompt_yes_no(
-            "Use the recommended model profile set?",
-            default=True,
-            input_func=input_func,
-            output_func=output_func,
-        )
-        if use_recommended_profiles:
-            output_func("Using the recommended local model set.")
-            model_profiles = recommended_model_profiles()
-        else:
-            model_profiles = _prompt_model_profiles(
-                settings,
-                input_func=input_func,
-                output_func=output_func,
+    prompt_ui.section(
+        "Model profiles",
+        "Choose the local models used for quick replies, default chat, deeper work, and code tasks.",
+    )
+    if beginner_mode:
+        model_profiles = recommended_model_profiles()
+        prompt_ui.info("Using the recommended local model profile set:")
+        for profile_name in _PROFILE_ORDER:
+            prompt_ui.info(
+                f"- {profile_name}: {model_profiles[profile_name].model_name}"
             )
     else:
         model_profiles = _prompt_model_profiles(
             settings,
-            input_func=input_func,
-            output_func=output_func,
+            prompt_ui=prompt_ui,
+            ollama_status=ollama_status,
         )
 
     telegram_bot_token_env_var = telegram_config.bot_token_env_var
     if "telegram" in enabled_channels:
-        output_func("")
-        output_func(
-            "Telegram needs a bot token in an environment variable before "
-            "`unclaw telegram` can start."
+        telegram_bot_token_env_var = _prompt_telegram_token_env_var_name(
+            telegram_config=telegram_config,
+            beginner_mode=beginner_mode,
+            prompt_ui=prompt_ui,
         )
-        if beginner_mode:
-            output_func(
-                f"Use `{telegram_bot_token_env_var}` for the token on this machine."
-            )
-        else:
-            telegram_bot_token_env_var = _prompt_text(
-                "Telegram bot token environment variable",
-                default=telegram_config.bot_token_env_var,
-                input_func=input_func,
-                output_func=output_func,
-            )
 
     plan = OnboardingPlan(
         beginner_mode=beginner_mode,
@@ -212,13 +579,11 @@ def run_onboarding(
         telegram_polling_timeout_seconds=telegram_config.polling_timeout_seconds,
     )
 
-    output_func("")
+    prompt_ui.section("Review", "Check the plan before Unclaw writes anything to disk.")
     _print_plan_summary(plan, output_func=output_func)
-    should_write_config = _prompt_yes_no(
+    should_write_config = prompt_ui.confirm(
         "Write this configuration now?",
         default=True,
-        input_func=input_func,
-        output_func=output_func,
     )
     if not should_write_config:
         output_func("No files were changed.")
@@ -235,8 +600,7 @@ def run_onboarding(
     ollama_status = _post_configure_ollama(
         configured_settings,
         plan,
-        input_func=input_func,
-        output_func=output_func,
+        prompt_ui=prompt_ui,
     )
 
     output_func("")
@@ -245,6 +609,9 @@ def run_onboarding(
     if "telegram" in enabled_channels:
         output_func(
             f"- Export `{plan.telegram_bot_token_env_var}` and run `unclaw telegram`."
+        )
+        output_func(
+            f"- Example: export {plan.telegram_bot_token_env_var}=<your bot token>"
         )
     else:
         output_func("- Enable Telegram later by rerunning `unclaw onboard`.")
@@ -256,7 +623,7 @@ def run_onboarding(
             profile_names=tuple(plan.model_profiles),
         )
         if missing_profiles:
-            output_func("- Pull the remaining missing models before heavy use.")
+            output_func("- Pull the remaining missing models before heavier use.")
 
     return 0
 
@@ -264,7 +631,16 @@ def run_onboarding(
 def recommended_model_profiles() -> dict[str, ModelProfileDraft]:
     """Return a fresh copy of the recommended local model profiles."""
 
-    return {name: draft for name, draft in _RECOMMENDED_PROFILES.items()}
+    return {
+        name: ModelProfileDraft(
+            provider=draft.provider,
+            model_name=draft.model_name,
+            temperature=draft.temperature,
+            thinking_supported=draft.thinking_supported,
+            tool_mode=draft.tool_mode,
+        )
+        for name, draft in _RECOMMENDED_PROFILES.items()
+    }
 
 
 def build_onboarding_file_payloads(
@@ -343,42 +719,43 @@ def _post_configure_ollama(
     settings: Settings,
     plan: OnboardingPlan,
     *,
-    input_func: InputFunc,
-    output_func: OutputFunc,
+    prompt_ui: PromptUI,
 ) -> OllamaStatus | None:
+    prompt_ui.section(
+        "Local model runtime",
+        "Check Ollama now so startup is smoother when you run Unclaw next.",
+    )
     ollama_status = inspect_ollama()
     if not ollama_status.is_installed:
-        output_func("")
-        output_func("Ollama is not installed yet.")
-        output_func(ollama_install_guidance())
+        prompt_ui.info("Ollama is not installed yet.")
+        prompt_ui.info(ollama_install_guidance())
         return None
 
     if not ollama_status.is_running:
-        output_func("")
-        should_start_ollama = _prompt_yes_no(
+        should_start_ollama = prompt_ui.confirm(
             "Ollama is not running. Start it now with `ollama serve`?",
             default=plan.automatic_configuration,
-            input_func=input_func,
-            output_func=output_func,
         )
         if should_start_ollama:
             try:
                 log_path = settings.paths.logs_dir / "ollama-serve.log"
                 start_ollama_server(log_path)
             except OSError as exc:
-                output_func(f"Could not start Ollama automatically: {exc}")
-                output_func("Start it manually with `ollama serve`.")
+                prompt_ui.info(f"Could not start Ollama automatically: {exc}")
+                prompt_ui.info("Start it manually with `ollama serve`.")
                 return None
 
             ollama_status = wait_for_ollama()
             if ollama_status.is_running:
-                output_func("Ollama is now running.")
+                prompt_ui.info("Ollama is now running.")
             else:
-                output_func("Ollama still does not look reachable.")
-                output_func("Start it manually with `ollama serve`, then rerun onboarding.")
+                prompt_ui.info("Ollama still does not look reachable.")
+                prompt_ui.info(
+                    "Start it manually with `ollama serve`, then rerun onboarding."
+                )
                 return None
         else:
-            output_func("Start Ollama later with `ollama serve`.")
+            prompt_ui.info("Start Ollama later with `ollama serve`.")
             return None
 
     missing_profiles = find_missing_model_profiles(
@@ -387,51 +764,75 @@ def _post_configure_ollama(
         profile_names=tuple(plan.model_profiles),
     )
     if not missing_profiles:
-        output_func("")
-        output_func("All selected models are already available in Ollama.")
+        prompt_ui.info("All selected models are already available in Ollama.")
         return ollama_status
 
     missing_models = _unique_model_names(missing_profiles)
-    output_func("")
-    output_func(
+    prompt_ui.info(
         "Missing local models: "
         + ", ".join(
             f"{profile_name}={model_name}"
             for profile_name, model_name in missing_profiles
         )
     )
-    should_pull_models = _prompt_yes_no(
+    should_pull_models = prompt_ui.confirm(
         "Pull the missing models now?",
         default=plan.automatic_configuration or plan.beginner_mode,
-        input_func=input_func,
-        output_func=output_func,
     )
     if not should_pull_models:
-        output_func("Pull them later with:")
+        prompt_ui.info("Pull them later with:")
         for model_name in missing_models:
-            output_func(f"- ollama pull {model_name}")
+            prompt_ui.info(f"- ollama pull {model_name}")
         return ollama_status
 
     for model_name in missing_models:
-        output_func(f"Pulling {model_name}...")
+        prompt_ui.info(f"Pulling {model_name}...")
         completed_process = subprocess.run(["ollama", "pull", model_name], check=False)
         if completed_process.returncode == 0:
-            output_func(f"Finished pulling {model_name}.")
+            prompt_ui.info(f"Finished pulling {model_name}.")
             continue
-        output_func(f"`ollama pull {model_name}` exited with code {completed_process.returncode}.")
+        prompt_ui.info(
+            f"`ollama pull {model_name}` exited with code {completed_process.returncode}."
+        )
 
     return inspect_ollama()
 
 
-def _load_existing_telegram_config(settings: Settings) -> TelegramConfig:
+def _load_existing_telegram_config(
+    settings: Settings,
+) -> tuple[TelegramConfig, str | None]:
     try:
-        return load_telegram_config(settings)
-    except UnclawError:
-        return TelegramConfig(
-            bot_token_env_var=_DEFAULT_TELEGRAM_TOKEN_ENV_VAR,
-            polling_timeout_seconds=30,
-            allowed_chat_ids=frozenset(),
+        return load_telegram_config(settings), None
+    except UnclawError as exc:
+        warning = (
+            "Telegram config note: "
+            f"{exc} Using {DEFAULT_TELEGRAM_TOKEN_ENV_VAR} until you choose a valid "
+            "environment variable name."
         )
+        return (
+            TelegramConfig(
+                bot_token_env_var=DEFAULT_TELEGRAM_TOKEN_ENV_VAR,
+                polling_timeout_seconds=30,
+                allowed_chat_ids=frozenset(),
+            ),
+            warning,
+        )
+
+
+def _build_prompt_ui(
+    *,
+    input_func: InputFunc,
+    output_func: OutputFunc,
+) -> PromptUI:
+    if (
+        input_func is input
+        and output_func is print
+        and questionary is not None
+        and sys.stdin.isatty()
+        and sys.stdout.isatty()
+    ):
+        return InteractivePromptUI(output_func=output_func)
+    return FallbackPromptUI(input_func=input_func, output_func=output_func)
 
 
 def _default_channels(settings: Settings) -> tuple[str, ...]:
@@ -445,42 +846,95 @@ def _default_channels(settings: Settings) -> tuple[str, ...]:
     return ("terminal",)
 
 
+def _prompt_channels(
+    *,
+    prompt_ui: PromptUI,
+    default_channels: tuple[str, ...],
+) -> tuple[str, ...]:
+    return prompt_ui.checkbox(
+        "Which channels should Unclaw enable?",
+        options=_CHANNEL_OPTIONS,
+        default_values=default_channels,
+        help_text="You can enable both. Telegram still requires a bot token env var.",
+    )
+
+
 def _prompt_model_profiles(
     settings: Settings,
     *,
-    input_func: InputFunc,
-    output_func: OutputFunc,
+    prompt_ui: PromptUI,
+    ollama_status: OllamaStatus,
 ) -> dict[str, ModelProfileDraft]:
-    output_func("")
-    output_func("Choose the model used for each profile.")
-    output_func("Press Enter to keep the suggested value.")
-
     profiles: dict[str, ModelProfileDraft] = {}
     recommended = recommended_model_profiles()
+    installed_model_names = (
+        ollama_status.model_names if ollama_status.is_running else ()
+    )
+
     for profile_name in _PROFILE_ORDER:
         current_profile = settings.models.get(profile_name)
-        default_model_name = (
+        current_model_name = (
             current_profile.model_name
             if current_profile is not None
             else recommended[profile_name].model_name
         )
-        model_name = _prompt_text(
-            f"Model for {profile_name}",
-            default=default_model_name,
-            input_func=input_func,
-            output_func=output_func,
+        recommended_model_name = recommended[profile_name].model_name
+
+        options, default_choice = _build_profile_menu_options(
+            profile_name=profile_name,
+            has_current_profile=current_profile is not None,
+            current_model_name=current_model_name,
+            recommended_model_name=recommended_model_name,
+            installed_model_names=installed_model_names,
+        )
+        selection = prompt_ui.select(
+            f"{profile_name.title()} profile",
+            options=options,
+            default=default_choice,
+            help_text=_build_profile_help_text(
+                profile_name=profile_name,
+                installed_model_names=installed_model_names,
+            ),
         )
 
-        if current_profile is None:
-            template = recommended[profile_name]
-        else:
-            template = ModelProfileDraft(
-                provider=current_profile.provider,
-                model_name=model_name,
-                temperature=current_profile.temperature,
-                thinking_supported=current_profile.thinking_supported,
-                tool_mode=current_profile.tool_mode,
+        if selection == "custom":
+            template = (
+                _draft_from_profile(current_profile)
+                if current_profile is not None
+                else recommended[profile_name]
             )
+            model_name = prompt_ui.text(
+                f"Custom model name for {profile_name}",
+                default=current_model_name,
+                help_text=(
+                    "Enter the exact local model name you plan to pull or already "
+                    "have in Ollama."
+                ),
+                validator=_validate_model_name,
+            )
+        elif selection == "recommended":
+            template = recommended[profile_name]
+            model_name = recommended_model_name
+        elif selection == "installed":
+            template = (
+                _draft_from_profile(current_profile)
+                if current_profile is not None
+                else recommended[profile_name]
+            )
+            model_name = _prompt_installed_model_name(
+                profile_name=profile_name,
+                current_model_name=current_model_name,
+                recommended_model_name=recommended_model_name,
+                installed_model_names=installed_model_names,
+                prompt_ui=prompt_ui,
+            )
+        else:
+            template = (
+                _draft_from_profile(current_profile)
+                if current_profile is not None
+                else recommended[profile_name]
+            )
+            model_name = current_model_name
 
         profiles[profile_name] = ModelProfileDraft(
             provider=template.provider,
@@ -493,103 +947,177 @@ def _prompt_model_profiles(
     return profiles
 
 
-def _prompt_yes_no(
-    prompt: str,
+def _build_profile_menu_options(
     *,
-    default: bool,
-    input_func: InputFunc,
-    output_func: OutputFunc,
-) -> bool:
-    suffix = "[Y/n]" if default else "[y/N]"
-    while True:
-        response = input_func(f"{prompt} {suffix} ").strip().lower()
-        if not response:
-            return default
-        if response in {"y", "yes"}:
-            return True
-        if response in {"n", "no"}:
-            return False
-        output_func("Please answer yes or no.")
-
-
-def _prompt_choice(
-    prompt: str,
-    *,
-    options: tuple[str, ...],
-    default: str,
-    input_func: InputFunc,
-    output_func: OutputFunc,
-) -> str:
-    normalized_options = tuple(option.lower() for option in options)
-    default_value = default.lower()
-    while True:
-        response = input_func(
-            f"{prompt} ({'/'.join(normalized_options)}) [{default_value}] "
-        ).strip().lower()
-        if not response:
-            return default_value
-        if response in normalized_options:
-            return response
-        output_func(f"Please choose one of: {', '.join(normalized_options)}.")
-
-
-def _prompt_channels(
-    *,
-    default_channels: tuple[str, ...],
-    input_func: InputFunc,
-    output_func: OutputFunc,
-) -> tuple[str, ...]:
-    default_text = ",".join(default_channels)
-    while True:
-        response = input_func(
-            "Enable channels (comma separated: terminal, telegram) "
-            f"[{default_text}] "
-        ).strip()
-        raw_values = response or default_text
-        selected_channels = tuple(
-            channel
-            for channel in _AVAILABLE_CHANNELS
-            if channel in {
-                value.strip().lower()
-                for value in raw_values.split(",")
-                if value.strip()
-            }
+    profile_name: str,
+    has_current_profile: bool,
+    current_model_name: str,
+    recommended_model_name: str,
+    installed_model_names: tuple[str, ...],
+) -> tuple[tuple[MenuOption, ...], str]:
+    options: list[MenuOption] = [
+        MenuOption(
+            value="current",
+            label=f"Keep current configured model: {current_model_name}",
+            description=(
+                "Leave this profile exactly as configured."
+                if has_current_profile
+                else "No current profile found, so this uses the detected fallback."
+            ),
+        ),
+        MenuOption(
+            value="recommended",
+            label=f"Switch to recommended model: {recommended_model_name}",
+            description=(
+                "Matches the current config."
+                if current_model_name == recommended_model_name
+                else "Use the updated local-friendly default for this role."
+            ),
+        ),
+    ]
+    if installed_model_names:
+        options.append(
+            MenuOption(
+                value="installed",
+                label="Choose from installed Ollama models",
+                description=(
+                    f"{len(installed_model_names)} local model(s) detected in Ollama."
+                ),
+            )
         )
-        if selected_channels:
-            return selected_channels
-        output_func("Choose at least one channel.")
+    options.append(
+        MenuOption(
+            value="custom",
+            label="Enter a custom model name",
+            description="Type another local model name manually.",
+        )
+    )
+    return tuple(options), "current" if has_current_profile else "recommended"
 
 
-def _prompt_text(
-    prompt: str,
+def _build_profile_help_text(
     *,
-    default: str,
-    input_func: InputFunc,
-    output_func: OutputFunc,
+    profile_name: str,
+    installed_model_names: tuple[str, ...],
 ) -> str:
-    while True:
-        response = input_func(f"{prompt} [{default}] ").strip()
-        if response:
-            return response
-        if default.strip():
-            return default.strip()
-        output_func("This value cannot be empty.")
+    base_text = _PROFILE_DESCRIPTIONS[profile_name]
+    if installed_model_names:
+        return (
+            f"{base_text} Ollama is running with "
+            f"{len(installed_model_names)} installed model(s) available."
+        )
+    return (
+        f"{base_text} Start Ollama to browse installed local models during setup."
+    )
+
+
+def _prompt_installed_model_name(
+    *,
+    profile_name: str,
+    current_model_name: str,
+    recommended_model_name: str,
+    installed_model_names: tuple[str, ...],
+    prompt_ui: PromptUI,
+) -> str:
+    options = tuple(
+        MenuOption(
+            value=model_name,
+            label=model_name,
+            description=_describe_installed_model(
+                model_name=model_name,
+                current_model_name=current_model_name,
+                recommended_model_name=recommended_model_name,
+            ),
+        )
+        for model_name in installed_model_names
+    )
+    default_model_name = _resolve_installed_model_default(
+        installed_model_names=installed_model_names,
+        current_model_name=current_model_name,
+        recommended_model_name=recommended_model_name,
+    )
+    return prompt_ui.select(
+        f"Installed Ollama model for {profile_name}",
+        options=options,
+        default=default_model_name,
+        help_text="Choose one of the local models already installed in Ollama.",
+    )
+
+
+def _prompt_telegram_token_env_var_name(
+    *,
+    telegram_config: TelegramConfig,
+    beginner_mode: bool,
+    prompt_ui: PromptUI,
+) -> str:
+    prompt_ui.section(
+        "Telegram token",
+        "This step asks for the environment variable name, not the bot token value itself.",
+    )
+    prompt_ui.info(
+        "Example env var name: TELEGRAM_BOT_TOKEN"
+    )
+    prompt_ui.info(
+        "Later you will export it like: export TELEGRAM_BOT_TOKEN=<your bot token>"
+    )
+
+    default_name = telegram_config.bot_token_env_var or DEFAULT_TELEGRAM_TOKEN_ENV_VAR
+    if beginner_mode and default_name == DEFAULT_TELEGRAM_TOKEN_ENV_VAR:
+        use_default = prompt_ui.confirm(
+            f"Use {DEFAULT_TELEGRAM_TOKEN_ENV_VAR} as the environment variable name?",
+            default=True,
+        )
+        if use_default:
+            return DEFAULT_TELEGRAM_TOKEN_ENV_VAR
+
+    return prompt_ui.text(
+        "Environment variable name for the Telegram bot token",
+        default=default_name,
+        help_text=(
+            "Use a name such as TELEGRAM_BOT_TOKEN. Do not paste the token value here."
+        ),
+        validator=_validate_telegram_env_var_name,
+    )
+
+
+def _validate_model_name(value: str) -> str | None:
+    normalized = value.strip()
+    if not normalized:
+        return "The model name cannot be empty."
+    return None
+
+
+def _validate_telegram_env_var_name(value: str) -> str | None:
+    try:
+        validate_telegram_token_env_var_name(value)
+    except ConfigurationError as exc:
+        return str(exc)
+    return None
+
+
+def _draft_from_profile(profile: ModelProfile) -> ModelProfileDraft:
+    return ModelProfileDraft(
+        provider=profile.provider,
+        model_name=profile.model_name,
+        temperature=profile.temperature,
+        thinking_supported=profile.thinking_supported,
+        tool_mode=profile.tool_mode,
+    )
 
 
 def _print_plan_summary(plan: OnboardingPlan, *, output_func: OutputFunc) -> None:
-    output_func("Planned setup:")
     output_func(
-        f"- mode: {'beginner' if plan.beginner_mode else 'advanced'} | "
-        f"automatic: {'yes' if plan.automatic_configuration else 'no'}"
+        f"- setup: {'recommended guided' if plan.beginner_mode else 'advanced custom'}"
+    )
+    output_func(
+        f"- automation defaults: {'on' if plan.automatic_configuration else 'off'}"
     )
     output_func(f"- logging: {plan.logging_mode}")
     output_func(f"- channels: {', '.join(plan.enabled_channels)}")
     for profile_name in _PROFILE_ORDER:
-        output_func(
-            f"- {profile_name}: {plan.model_profiles[profile_name].model_name}"
-        )
+        output_func(f"- {profile_name}: {plan.model_profiles[profile_name].model_name}")
     if "telegram" in plan.enabled_channels:
-        output_func(f"- telegram env var: {plan.telegram_bot_token_env_var}")
+        output_func(f"- Telegram token env var: {plan.telegram_bot_token_env_var}")
 
 
 def _write_yaml(path: Path, payload: dict[str, object]) -> None:
@@ -609,5 +1137,90 @@ def _describe_ollama_status(ollama_status: OllamaStatus) -> str:
     return f"running with {len(ollama_status.model_names)} model(s)"
 
 
+def _build_onboarding_banner(*, settings: Settings, ollama_status: OllamaStatus) -> str:
+    title = "UNCLAW ONBOARDING"
+    subtitle = "Guided local-first setup for terminal chat and Telegram access."
+    rows = (
+        ("project", str(settings.paths.project_root)),
+        ("config", str(settings.paths.config_dir)),
+        ("ollama", _describe_ollama_status(ollama_status)),
+    )
+    width = max(
+        76,
+        len(title),
+        len(subtitle),
+        *(len(line) for line in _ONBOARDING_WORDMARK),
+        *(len(_format_banner_row(label, value)) for label, value in rows),
+    )
+
+    lines = [_banner_border("=", width)]
+    lines.extend(_banner_line(line, width) for line in _ONBOARDING_WORDMARK)
+    lines.append(_banner_line(title, width))
+    lines.append(_banner_line(subtitle, width))
+    lines.append(_banner_border("-", width))
+    lines.extend(
+        _banner_line(_format_banner_row(label, value), width)
+        for label, value in rows
+    )
+    lines.append(_banner_border("=", width))
+    return "\n".join(lines)
+
+
 def _unique_model_names(missing_profiles: tuple[tuple[str, str], ...]) -> tuple[str, ...]:
-    return tuple(dict.fromkeys(model_name for _profile_name, model_name in missing_profiles))
+    return tuple(
+        dict.fromkeys(model_name for _profile_name, model_name in missing_profiles)
+    )
+
+
+def _format_banner_row(label: str, value: str) -> str:
+    return f"{label.upper():<10} {value}"
+
+
+def _banner_border(fill: str, width: int) -> str:
+    return f"+{fill * (width + 2)}+"
+
+
+def _banner_line(content: str, width: int) -> str:
+    return f"| {content:<{width}} |"
+
+
+def _resolve_select_default(*, options: tuple[MenuOption, ...], default: str) -> str:
+    for option in options:
+        if option.value == default:
+            return default
+    return options[0].value
+
+
+def _resolve_installed_model_default(
+    *,
+    installed_model_names: tuple[str, ...],
+    current_model_name: str,
+    recommended_model_name: str,
+) -> str:
+    if current_model_name in installed_model_names:
+        return current_model_name
+    if recommended_model_name in installed_model_names:
+        return recommended_model_name
+    return installed_model_names[0]
+
+
+def _describe_installed_model(
+    *,
+    model_name: str,
+    current_model_name: str,
+    recommended_model_name: str,
+) -> str | None:
+    tags: list[str] = []
+    if model_name == current_model_name:
+        tags.append("current")
+    if model_name == recommended_model_name:
+        tags.append("recommended")
+    if not tags:
+        return None
+    return ", ".join(tags)
+
+
+def _render_menu_title(option: MenuOption) -> str:
+    if option.description:
+        return f"{option.label} - {option.description}"
+    return option.label

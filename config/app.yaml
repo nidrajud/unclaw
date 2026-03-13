@@ -16,8 +16,8 @@ logging:
   file_enabled: true
   file_name: runtime.log
 channels:
-  terminal_enabled: false
-  telegram_enabled: true
+  terminal_enabled: true
+  telegram_enabled: false
 models:
   default_profile: main
 thinking:

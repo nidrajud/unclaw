@@ -131,7 +131,7 @@ def run_cli(
             user_input=stripped_input,
             tracer=tracer,
         )
-        print(f"assistant> {assistant_reply}")
+        print(f"Unclaw> {assistant_reply}")
         try:
             memory_manager.build_or_refresh_session_summary(session.id)
         except UnclawError as exc:
@@ -186,8 +186,8 @@ def _build_preflight_banner(settings: Settings) -> str:
 def _build_prompt(command_handler: CommandHandler) -> str:
     session = command_handler.session_manager.ensure_current_session()
     return (
-        f"[{session.id} | model={command_handler.current_model_profile_name} | "
-        f"think={command_handler.thinking_label}] you> "
+        f"unclaw[{session.id} | model={command_handler.current_model_profile_name} | "
+        f"think={command_handler.thinking_label}]> "
     )
 
 

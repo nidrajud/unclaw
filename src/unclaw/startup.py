@@ -6,6 +6,8 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
+import textwrap
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -14,6 +16,14 @@ from time import sleep
 from unclaw.llm.base import LLMProviderError
 from unclaw.llm.ollama_provider import OllamaProvider
 from unclaw.settings import Settings
+
+_ASCII_WORDMARK = (
+    " _   _            _                 ",
+    "| | | |_ __   ___| | __ ___      __",
+    "| | | | '_ \\ / __| |/ _` \\ \\ /\\ / /",
+    "| |_| | | | | (__| | (_| |\\ V  V / ",
+    " \\___/|_| |_|\\___|_|\\__,_| \\_/\\_/  ",
+)
 
 
 class CheckStatus(StrEnum):
@@ -45,6 +55,20 @@ class StartupReport:
     @property
     def has_errors(self) -> bool:
         return any(check.status is CheckStatus.ERROR for check in self.checks)
+
+    @property
+    def has_warnings(self) -> bool:
+        return any(check.status is CheckStatus.WARN for check in self.checks)
+
+    @property
+    def summary_status(self) -> CheckStatus:
+        if self.has_errors:
+            return CheckStatus.ERROR
+        if self.has_warnings:
+            return CheckStatus.WARN
+        if any(check.status is CheckStatus.OK for check in self.checks):
+            return CheckStatus.OK
+        return CheckStatus.INFO
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,7 +166,9 @@ def build_startup_report(
     """Build a user-facing startup report for one channel."""
 
     checks: list[StartupCheck] = []
-    checks.append(_build_channel_check(channel_name=channel_name, channel_enabled=channel_enabled))
+    checks.append(
+        _build_channel_check(channel_name=channel_name, channel_enabled=channel_enabled)
+    )
 
     ollama_status = inspect_ollama()
     checks.extend(_build_ollama_checks(ollama_status))
@@ -210,28 +236,67 @@ def build_banner(
     title: str,
     subtitle: str,
     rows: tuple[tuple[str, str], ...],
+    use_color: bool | None = None,
 ) -> str:
-    """Build a compact text-only startup banner."""
+    """Build a polished ASCII banner for terminal startup flows."""
 
-    content_lines = [title, subtitle, *(_format_row(label, value) for label, value in rows)]
-    width = max(64, *(len(line) for line in content_lines))
-    border = "=" * width
-    divider = "-" * width
+    use_color = _should_use_color() if use_color is None else use_color
+    row_lines = tuple(_format_row(label, value) for label, value in rows)
+    width = max(
+        72,
+        *(len(line) for line in _ASCII_WORDMARK),
+        len(title),
+        len(subtitle),
+        *(len(line) for line in row_lines),
+    )
 
-    rendered_lines = [border, title, subtitle, divider]
-    rendered_lines.extend(_format_row(label, value) for label, value in rows)
-    rendered_lines.append(border)
-    return "\n".join(rendered_lines)
+    lines = [_frame_border("=", width)]
+    lines.extend(_frame_line(_style_art(line, use_color), width) for line in _ASCII_WORDMARK)
+    lines.append(_frame_line(_style_text(title, "cyan", use_color, bold=True), width))
+    lines.append(_frame_line(_style_text(subtitle, "dim", use_color), width))
+    lines.append(_frame_border("-", width))
+    lines.extend(_frame_line(line, width) for line in row_lines)
+    lines.append(_frame_border("=", width))
+    return "\n".join(lines)
 
 
-def format_startup_report(report: StartupReport) -> str:
+def format_startup_report(
+    report: StartupReport,
+    *,
+    use_color: bool | None = None,
+) -> str:
     """Render a startup report for the terminal."""
 
-    lines = ["Startup checks:"]
+    use_color = _should_use_color() if use_color is None else use_color
+    terminal_width = max(80, shutil.get_terminal_size((96, 20)).columns)
+    heading = (
+        "Preflight: ready"
+        if report.summary_status is CheckStatus.OK
+        else "Preflight: ready with warnings"
+        if report.summary_status is CheckStatus.WARN
+        else "Preflight: action required"
+        if report.summary_status is CheckStatus.ERROR
+        else "Preflight"
+    )
+
+    lines = [_style_text(heading, "cyan", use_color, bold=True)]
     for check in report.checks:
-        lines.append(f"  [{check.status.value}] {check.label}: {check.detail}")
+        prefix = f"  {_status_badge(check.status, use_color)} {check.label:<15} "
+        wrap_width = max(24, terminal_width - _visible_length(prefix))
+        detail_lines = textwrap.wrap(check.detail, width=wrap_width) or [check.detail]
+        lines.append(f"{prefix}{detail_lines[0]}")
+        continuation_prefix = " " * _visible_length(prefix)
+        for detail_line in detail_lines[1:]:
+            lines.append(f"{continuation_prefix}{detail_line}")
         if check.guidance:
-            lines.append(f"        {check.guidance}")
+            guidance_prefix = " " * 4 + _style_text("Tip:", "dim", use_color) + " "
+            guidance_width = max(24, terminal_width - 5)
+            guidance_lines = textwrap.wrap(check.guidance, width=guidance_width)
+            if guidance_lines:
+                lines.append(f"{guidance_prefix}{guidance_lines[0]}")
+                padding = " " * 9
+                for guidance_line in guidance_lines[1:]:
+                    lines.append(f"{padding}{guidance_line}")
     return "\n".join(lines)
 
 
@@ -374,4 +439,79 @@ def _build_telegram_token_check(bot_token_env_var: str) -> StartupCheck:
 
 
 def _format_row(label: str, value: str) -> str:
-    return f"{label:<12} {value}"
+    return f"{label.upper():<10} {value}"
+
+
+def _frame_border(fill: str, width: int) -> str:
+    return f"+{fill * (width + 2)}+"
+
+
+def _frame_line(content: str, width: int) -> str:
+    padding = max(0, width - _visible_length(content))
+    return f"| {content}{' ' * padding} |"
+
+
+def _status_badge(status: CheckStatus, use_color: bool) -> str:
+    badge_text = {
+        CheckStatus.OK: "[OK  ]",
+        CheckStatus.WARN: "[WARN]",
+        CheckStatus.ERROR: "[FAIL]",
+        CheckStatus.INFO: "[INFO]",
+    }[status]
+    color = {
+        CheckStatus.OK: "green",
+        CheckStatus.WARN: "yellow",
+        CheckStatus.ERROR: "red",
+        CheckStatus.INFO: "blue",
+    }[status]
+    return _style_text(badge_text, color, use_color, bold=True)
+
+
+def _style_art(text: str, use_color: bool) -> str:
+    return _style_text(text, "blue", use_color, bold=True)
+
+
+def _style_text(text: str, color: str, use_color: bool, *, bold: bool = False) -> str:
+    if not use_color:
+        return text
+
+    color_code = {
+        "blue": "34",
+        "cyan": "36",
+        "green": "32",
+        "yellow": "33",
+        "red": "31",
+        "dim": "2",
+    }[color]
+    if color == "dim":
+        codes = [color_code]
+    else:
+        codes = [color_code]
+        if bold:
+            codes.insert(0, "1")
+    if bold and color == "dim":
+        codes.insert(0, "1")
+    return f"\033[{';'.join(codes)}m{text}\033[0m"
+
+
+def _visible_length(text: str) -> int:
+    length = 0
+    in_escape = False
+    for character in text:
+        if character == "\033":
+            in_escape = True
+            continue
+        if in_escape:
+            if character == "m":
+                in_escape = False
+            continue
+        length += 1
+    return length
+
+
+def _should_use_color() -> bool:
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("TERM") == "dumb":
+        return False
+    return sys.stdout.isatty()
