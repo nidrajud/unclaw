@@ -142,7 +142,7 @@ unclaw/
     │   ├── test_context_builder.py # Unit tests for context building
     │   ├── test_tools.py           # Unit tests for tools
     │   └── test_memory.py          # Unit tests for memory modules
-│
+    │
     └── integration/
         ├── test_cli_flow.py        # Integration test for the terminal flow
         ├── test_telegram_flow.py   # Integration test for the Telegram flow
