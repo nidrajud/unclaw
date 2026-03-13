@@ -121,7 +121,8 @@ class CommandHandler:
                 case "ls":
                     return self._handle_tool_command(
                         parsed_command,
-                        usage_line="/ls <path>",
+                        usage_line="/ls [path]",
+                        default_argument_value=".",
                     )
                 case "fetch":
                     return self._handle_tool_command(
@@ -279,8 +280,11 @@ class CommandHandler:
         parsed_command: ParsedCommand,
         *,
         usage_line: str,
+        default_argument_value: str | None = None,
     ) -> CommandResult:
         argument_value = self._read_freeform_argument(parsed_command)
+        if argument_value is None:
+            argument_value = default_argument_value
         if argument_value is None:
             return self._usage(usage_line)
 
@@ -321,17 +325,22 @@ class CommandHandler:
             "/think off             Turn thinking mode off.",
             "",
             "Tools:",
-            "/tools       List built-in tools.",
-            "/read <path> Read one local file.",
-            "/ls <path>   List one local directory.",
-            "/fetch <url> Fetch one URL.",
+            "/tools            List built-in tools.",
+            "/read <path>      Read one local file.",
+            "/ls [path]        List one local directory. Defaults to the current directory.",
+            "/fetch <url>      Fetch one URL.",
             "",
             "Memory:",
             "/session  Show the current session state.",
             "/summary  Show the saved session summary.",
             "",
             "General:",
-            "/help  Show this command list.",
+            "/help  Show this command list with examples.",
+            "",
+            "Examples:",
+            "/ls .",
+            "/ls /home/user/project",
+            "/read README.md",
         ]
         if self.allow_exit:
             lines.append("/exit  Leave the terminal runtime.")

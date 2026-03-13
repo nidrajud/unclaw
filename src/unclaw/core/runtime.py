@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+from time import perf_counter
+
 from unclaw.core.command_handler import CommandHandler
-from unclaw.core.orchestrator import Orchestrator, OrchestratorError
+from unclaw.core.orchestrator import (
+    ModelCallFailedError,
+    Orchestrator,
+    OrchestratorError,
+)
 from unclaw.core.router import route_request
 from unclaw.core.session_manager import SessionManager, SessionManagerError
 from unclaw.errors import ConfigurationError
-from unclaw.llm.base import LLMError
+from unclaw.llm.base import LLMContentCallback, LLMError
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
 from unclaw.schemas.chat import MessageRole
@@ -26,6 +32,7 @@ def run_user_turn(
     user_input: str,
     tracer: Tracer | None = None,
     event_bus: EventBus | None = None,
+    stream_output_func: LLMContentCallback | None = None,
 ) -> str:
     """Run the minimal runtime path and persist the assistant reply."""
     session = session_manager.ensure_current_session()
@@ -40,11 +47,15 @@ def run_user_turn(
     )
 
     selected_model_profile_name = command_handler.current_model_profile.name
+    selected_model = command_handler.current_model_profile
     thinking_enabled = command_handler.thinking_enabled is True
+    turn_started_at = perf_counter()
 
     active_tracer.trace_runtime_started(
         session_id=session.id,
         model_profile_name=selected_model_profile_name,
+        provider=selected_model.provider,
+        model_name=selected_model.model_name,
         thinking_enabled=thinking_enabled,
         input_length=len(user_input),
     )
@@ -70,8 +81,29 @@ def run_user_turn(
             session_id=session.id,
             user_message=user_input,
             model_profile_name=route.model_profile_name,
+            thinking_enabled=thinking_enabled,
+            content_callback=stream_output_func,
         )
-        assistant_reply = response.content.strip() or _EMPTY_RESPONSE_REPLY
+        active_tracer.trace_model_succeeded(
+            session_id=session.id,
+            provider=response.response.provider,
+            model_name=response.response.model_name,
+            finish_reason=response.response.finish_reason,
+            output_length=len(response.response.content),
+            model_duration_ms=response.model_duration_ms,
+            reasoning=response.response.reasoning,
+        )
+        assistant_reply = response.response.content.strip() or _EMPTY_RESPONSE_REPLY
+    except ModelCallFailedError as exc:
+        active_tracer.trace_model_failed(
+            session_id=session.id,
+            provider=exc.provider,
+            model_profile_name=exc.model_profile_name,
+            model_name=exc.model_name,
+            model_duration_ms=exc.duration_ms,
+            error=str(exc),
+        )
+        assistant_reply = _RUNTIME_ERROR_REPLY
     except (
         ConfigurationError,
         LLMError,
@@ -80,11 +112,9 @@ def run_user_turn(
     ) as exc:
         active_tracer.trace_model_failed(
             session_id=session.id,
-            provider=_resolve_provider_name(
-                session_manager=session_manager,
-                model_profile_name=selected_model_profile_name,
-            ),
+            provider=selected_model.provider,
             model_profile_name=selected_model_profile_name,
+            model_name=selected_model.model_name,
             error=str(exc),
         )
         assistant_reply = _RUNTIME_ERROR_REPLY
@@ -97,16 +127,10 @@ def run_user_turn(
     active_tracer.trace_assistant_reply_persisted(
         session_id=session.id,
         output_length=len(assistant_reply),
+        turn_duration_ms=_elapsed_ms(turn_started_at),
     )
     return assistant_reply
 
 
-def _resolve_provider_name(
-    *,
-    session_manager: SessionManager,
-    model_profile_name: str,
-) -> str | None:
-    profile = session_manager.settings.models.get(model_profile_name)
-    if profile is None:
-        return None
-    return profile.provider
+def _elapsed_ms(started_at: float) -> int:
+    return max(0, round((perf_counter() - started_at) * 1000))

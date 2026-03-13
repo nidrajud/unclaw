@@ -18,7 +18,6 @@ def test_help_lists_enriched_commands_for_cli() -> None:
 
     assert result.status is CommandStatus.OK
     assert result.lines[0] == "Available slash commands for this channel:"
-    assert "/help  Show this command list." in result.lines
     assert "/new               Start a fresh session." in result.lines
     assert "/sessions          List recent sessions." in result.lines
     assert "/use <session_id>  Switch to an existing session." in result.lines
@@ -27,12 +26,20 @@ def test_help_lists_enriched_commands_for_cli() -> None:
     assert "/think                 Show thinking mode status." in result.lines
     assert "/think on              Turn thinking mode on." in result.lines
     assert "/think off             Turn thinking mode off." in result.lines
-    assert "/tools       List built-in tools." in result.lines
-    assert "/read <path> Read one local file." in result.lines
-    assert "/ls <path>   List one local directory." in result.lines
-    assert "/fetch <url> Fetch one URL." in result.lines
+    assert "/tools            List built-in tools." in result.lines
+    assert "/read <path>      Read one local file." in result.lines
+    assert (
+        "/ls [path]        List one local directory. Defaults to the current directory."
+        in result.lines
+    )
+    assert "/fetch <url>      Fetch one URL." in result.lines
     assert "/session  Show the current session state." in result.lines
     assert "/summary  Show the saved session summary." in result.lines
+    assert "/help  Show this command list with examples." in result.lines
+    assert "Examples:" in result.lines
+    assert "/ls ." in result.lines
+    assert "/ls /home/user/project" in result.lines
+    assert "/read README.md" in result.lines
     assert "/exit  Leave the terminal runtime." in result.lines
     assert (
         "Tip: use 'unclaw logs simple' or 'unclaw logs full' in another terminal."
@@ -138,6 +145,20 @@ def test_switching_back_to_supported_model_keeps_thinking_off() -> None:
     assert result.status is CommandStatus.OK
     assert handler.current_model_profile_name == "main"
     assert handler.thinking_enabled is False
+
+
+def test_ls_defaults_to_current_directory_when_no_path_is_given() -> None:
+    handler = CommandHandler(
+        settings=_load_repo_settings(),
+        session_manager=_build_session_manager(),
+    )
+
+    result = handler.handle("/ls")
+
+    assert result.status is CommandStatus.OK
+    assert result.tool_call is not None
+    assert result.tool_call.tool_name == "list_directory"
+    assert result.tool_call.arguments == {"path": "."}
 
 
 def _load_repo_settings():

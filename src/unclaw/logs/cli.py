@@ -27,6 +27,7 @@ _SIMPLE_EVENT_TYPES = frozenset(
         "session.started",
         "session.selected",
         "model.profile.selected",
+        "model.succeeded",
         "thinking.changed",
         "runtime.started",
         "route.selected",
@@ -106,7 +107,8 @@ def run_logs(
     elif initial_raw_lines:
         output_func("")
         output_func(
-            "No high-signal runtime events matched yet. Use `unclaw logs full` for the raw stream."
+            "No concise runtime events matched the simple view yet. "
+            "Use `unclaw logs full` for the raw JSON stream."
         )
     else:
         output_func("")
@@ -154,7 +156,7 @@ def format_log_header(log_view: LogView, *, follow: bool) -> tuple[str, ...]:
         (
             "View: important runtime events"
             if log_view.mode == "simple"
-            else "View: raw runtime log stream"
+            else "View: raw JSON runtime log stream"
         ),
     ]
     if follow:
@@ -242,50 +244,93 @@ def render_simple_log_line(raw_line: str) -> str | None:
                 f"title={payload.get('title', '?')}"
             )
         case "model.profile.selected":
-            return (
-                f"[{timestamp}] model selected | "
+            details = [
                 f"{payload.get('model_profile_name', '?')} -> {payload.get('model_name', '?')}"
-            )
+            ]
+            provider = payload.get("provider")
+            if isinstance(provider, str) and provider:
+                details.append(f"provider={provider}")
+            return f"[{timestamp}] model selected | {' | '.join(details)}"
         case "thinking.changed":
             thinking_enabled = payload.get("thinking_enabled")
             thinking_label = "on" if thinking_enabled is True else "off"
             reason = payload.get("reason")
-            return (
-                f"[{timestamp}] thinking {thinking_label} | "
-                f"model={payload.get('model_profile_name', '?')} | {reason}"
-            )
+            details = [
+                f"model={payload.get('model_profile_name', '?')}",
+                f"thinking={thinking_label}",
+            ]
+            if isinstance(reason, str) and reason:
+                details.append(reason)
+            return f"[{timestamp}] thinking changed | {' | '.join(details)}"
         case "runtime.started":
             thinking_enabled = payload.get("thinking_enabled")
             thinking_label = "on" if thinking_enabled is True else "off"
-            return (
-                f"[{timestamp}] assistant turn started | session={event.session_id} | "
-                f"model={payload.get('model_profile_name', '?')} | thinking={thinking_label}"
-            )
+            details = [
+                f"session={event.session_id}",
+                f"profile={payload.get('model_profile_name', '?')}",
+            ]
+            provider_model = _format_provider_model(payload)
+            if provider_model is not None:
+                details.append(f"model={provider_model}")
+            details.append(f"thinking={thinking_label}")
+            return f"[{timestamp}] assistant turn started | {' | '.join(details)}"
         case "route.selected":
             return (
                 f"[{timestamp}] route selected | "
-                f"{payload.get('route_kind', '?')} | model={payload.get('model_profile_name', '?')}"
+                f"{payload.get('route_kind', '?')} | profile={payload.get('model_profile_name', '?')}"
             )
+        case "model.succeeded":
+            details = [
+                f"model={_format_provider_model(payload) or '?'}",
+                f"chars={payload.get('output_length', '?')}",
+            ]
+            duration_label = _format_duration_value(payload.get("model_duration_ms"))
+            if duration_label is not None:
+                details.append(f"duration={duration_label}")
+            finish_reason = payload.get("finish_reason")
+            if isinstance(finish_reason, str) and finish_reason:
+                details.append(f"finish={finish_reason}")
+            reasoning_label = _format_reasoning_label(payload)
+            if reasoning_label is not None:
+                details.append(reasoning_label)
+            return f"[{timestamp}] model reply | {' | '.join(details)}"
         case "assistant.reply.persisted":
-            return (
-                f"[{timestamp}] assistant reply saved | session={event.session_id} | "
-                f"chars={payload.get('output_length', '?')}"
-            )
+            details = [
+                f"session={event.session_id}",
+                f"chars={payload.get('output_length', '?')}",
+            ]
+            duration_label = _format_duration_value(payload.get("turn_duration_ms"))
+            if duration_label is not None:
+                details.append(f"turn={duration_label}")
+            return f"[{timestamp}] assistant reply saved | {' | '.join(details)}"
         case "tool.started":
-            return f"[{timestamp}] tool started | {payload.get('tool_name', '?')}"
+            details = [str(payload.get("tool_name", "?"))]
+            argument_summary = _format_tool_argument_summary(payload.get("arguments"))
+            if argument_summary is not None:
+                details.append(argument_summary)
+            return f"[{timestamp}] tool started | {' | '.join(details)}"
         case "tool.finished":
             success = payload.get("success")
-            status = "finished" if success is True else "failed"
+            status = "ok" if success is True else "failed"
             error = payload.get("error")
-            suffix = f" | error={error}" if isinstance(error, str) and error else ""
-            return (
-                f"[{timestamp}] tool {status} | {payload.get('tool_name', '?')}{suffix}"
-            )
+            details = [str(payload.get("tool_name", "?"))]
+            duration_label = _format_duration_value(payload.get("tool_duration_ms"))
+            if duration_label is not None:
+                details.append(f"duration={duration_label}")
+            details.append(f"chars={payload.get('output_length', '?')}")
+            if isinstance(error, str) and error:
+                details.append(f"error={error}")
+            return f"[{timestamp}] tool {status} | {' | '.join(details)}"
         case "model.failed":
-            return (
-                f"[{timestamp}] model failed | "
-                f"profile={payload.get('model_profile_name', '?')} | {payload.get('error', event.message)}"
-            )
+            details = [f"profile={payload.get('model_profile_name', '?')}"]
+            provider_model = _format_provider_model(payload)
+            if provider_model is not None:
+                details.append(f"model={provider_model}")
+            duration_label = _format_duration_value(payload.get("model_duration_ms"))
+            if duration_label is not None:
+                details.append(f"duration={duration_label}")
+            details.append(str(payload.get("error", event.message)))
+            return f"[{timestamp}] model failed | {' | '.join(details)}"
         case "telegram.message.received":
             is_command = payload.get("is_command")
             return (
@@ -354,6 +399,48 @@ def _compact_timestamp(value: str) -> str:
         return value
     date_part, time_part = value.split("T", maxsplit=1)
     return f"{date_part} {time_part.rstrip('Z')}"
+
+
+def _format_duration_value(value: object) -> str | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return f"{value} ms"
+
+
+def _format_provider_model(payload: dict[str, Any]) -> str | None:
+    provider = payload.get("provider")
+    model_name = payload.get("model_name")
+    if isinstance(provider, str) and provider and isinstance(model_name, str) and model_name:
+        return f"{provider}/{model_name}"
+    if isinstance(model_name, str) and model_name:
+        return model_name
+    if isinstance(provider, str) and provider:
+        return provider
+    return None
+
+
+def _format_reasoning_label(payload: dict[str, Any]) -> str | None:
+    reasoning_length = payload.get("reasoning_length")
+    if isinstance(reasoning_length, int) and not isinstance(reasoning_length, bool):
+        return f"reasoning={reasoning_length} chars"
+
+    reasoning_text = payload.get("reasoning_text")
+    if isinstance(reasoning_text, str) and reasoning_text:
+        return f"reasoning={len(reasoning_text)} chars"
+
+    return None
+
+
+def _format_tool_argument_summary(arguments: object) -> str | None:
+    if not isinstance(arguments, dict):
+        return None
+
+    for key in ("path", "url"):
+        value = arguments.get(key)
+        if isinstance(value, str) and value:
+            return f"{key}={value}"
+
+    return None
 
 
 def _looks_like_warning_or_error(line: str) -> bool:

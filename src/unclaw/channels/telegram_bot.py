@@ -376,6 +376,7 @@ class TelegramBotChannel:
                 tool_name=result.tool_call.tool_name,
                 arguments=result.tool_call.arguments,
             )
+            tool_started_at = time.perf_counter()
             tool_result = self.tool_executor.execute(result.tool_call)
             self.tracer.trace_tool_finished(
                 session_id=session_id,
@@ -383,6 +384,7 @@ class TelegramBotChannel:
                 success=tool_result.success,
                 output_length=len(tool_result.output_text),
                 error=tool_result.error,
+                tool_duration_ms=_elapsed_ms(tool_started_at),
             )
             reply_text = _format_tool_result(tool_result)
         elif result.should_exit:
@@ -702,6 +704,10 @@ def _split_message_chunks(text: str, *, limit: int = _MESSAGE_LIMIT) -> list[str
 
     chunks.append(remaining)
     return chunks
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return max(0, round((time.perf_counter() - started_at) * 1000))
 
 
 def _read_http_error_body(exc: HTTPError) -> str:

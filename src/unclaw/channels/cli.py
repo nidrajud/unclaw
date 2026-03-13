@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
+from time import perf_counter
 
 from unclaw.bootstrap import bootstrap
 from unclaw.core.command_handler import CommandHandler, CommandResult, CommandStatus
@@ -23,6 +25,40 @@ from unclaw.startup import (
     format_startup_report,
 )
 from unclaw.tools.contracts import ToolDefinition, ToolResult
+
+
+@dataclass(slots=True)
+class _TerminalAssistantStream:
+    """Render streamed assistant output without faking partial tokens."""
+
+    chunks: list[str] = field(default_factory=list)
+    started: bool = False
+
+    def write(self, chunk: str) -> None:
+        if not chunk:
+            return
+
+        if not self.started:
+            sys.stdout.write("Unclaw> ")
+            self.started = True
+
+        sys.stdout.write(chunk)
+        sys.stdout.flush()
+        self.chunks.append(chunk)
+
+    def finish(self, final_text: str) -> None:
+        if not self.started:
+            print(f"Unclaw> {final_text}")
+            return
+
+        streamed_text = "".join(self.chunks).strip()
+        if streamed_text == final_text:
+            print()
+            return
+
+        print()
+        print("[stream interrupted; showing the saved final reply]")
+        print(f"Unclaw> {final_text}")
 
 
 def main(project_root: Path | None = None) -> int:
@@ -140,6 +176,7 @@ def run_cli(
                     tool_name=result.tool_call.tool_name,
                     arguments=result.tool_call.arguments,
                 )
+                tool_started_at = perf_counter()
                 tool_result = tool_executor.execute(result.tool_call)
                 tracer.trace_tool_finished(
                     session_id=session.id,
@@ -147,6 +184,7 @@ def run_cli(
                     success=tool_result.success,
                     output_length=len(tool_result.output_text),
                     error=tool_result.error,
+                    tool_duration_ms=_elapsed_ms(tool_started_at),
                 )
                 _render_tool_result(tool_result)
                 continue
@@ -161,13 +199,15 @@ def run_cli(
             stripped_input,
             session_id=session.id,
         )
+        assistant_stream = _TerminalAssistantStream()
         assistant_reply = run_user_turn(
             session_manager=session_manager,
             command_handler=command_handler,
             user_input=stripped_input,
             tracer=tracer,
+            stream_output_func=assistant_stream.write,
         )
-        print(f"Unclaw> {assistant_reply}")
+        assistant_stream.finish(assistant_reply)
         try:
             memory_manager.build_or_refresh_session_summary(session.id)
         except UnclawError as exc:
@@ -281,6 +321,10 @@ def _render_tool_result(result: ToolResult) -> None:
     print(f"Error: {first_line}")
     for line in other_lines:
         print(line)
+
+
+def _elapsed_ms(started_at: float) -> int:
+    return max(0, round((perf_counter() - started_at) * 1000))
 
 
 if __name__ == "__main__":

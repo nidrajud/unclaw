@@ -142,19 +142,27 @@ class Tracer:
         *,
         session_id: str,
         model_profile_name: str,
+        provider: str | None = None,
+        model_name: str | None = None,
         thinking_enabled: bool,
         input_length: int,
     ) -> None:
+        payload: dict[str, Any] = {
+            "model_profile_name": model_profile_name,
+            "thinking_enabled": thinking_enabled,
+            "input_length": input_length,
+        }
+        if provider is not None:
+            payload["provider"] = provider
+        if model_name is not None:
+            payload["model_name"] = model_name
+
         self._emit(
             session_id=session_id,
             event_type="runtime.started",
             level=EventLevel.INFO,
             message="Runtime turn started.",
-            payload={
-                "model_profile_name": model_profile_name,
-                "thinking_enabled": thinking_enabled,
-                "input_length": input_length,
-            },
+            payload=payload,
         )
 
     def trace_route_selected(
@@ -205,18 +213,27 @@ class Tracer:
         model_name: str,
         finish_reason: str | None,
         output_length: int,
+        model_duration_ms: int | None = None,
+        reasoning: str | None = None,
     ) -> None:
+        payload: dict[str, Any] = {
+            "provider": provider,
+            "model_name": model_name,
+            "finish_reason": finish_reason,
+            "output_length": output_length,
+        }
+        if model_duration_ms is not None:
+            payload["model_duration_ms"] = model_duration_ms
+        if reasoning is not None and reasoning.strip():
+            payload["reasoning_text"] = reasoning
+            payload["reasoning_length"] = len(reasoning)
+
         self._emit(
             session_id=session_id,
             event_type="model.succeeded",
             level=EventLevel.INFO,
             message="Model call finished successfully.",
-            payload={
-                "provider": provider,
-                "model_name": model_name,
-                "finish_reason": finish_reason,
-                "output_length": output_length,
-            },
+            payload=payload,
         )
 
     def trace_assistant_reply_persisted(
@@ -224,15 +241,20 @@ class Tracer:
         *,
         session_id: str,
         output_length: int,
+        turn_duration_ms: int | None = None,
     ) -> None:
+        payload: dict[str, Any] = {
+            "output_length": output_length,
+        }
+        if turn_duration_ms is not None:
+            payload["turn_duration_ms"] = turn_duration_ms
+
         self._emit(
             session_id=session_id,
             event_type="assistant.reply.persisted",
             level=EventLevel.INFO,
             message="Assistant reply persisted.",
-            payload={
-                "output_length": output_length,
-            },
+            payload=payload,
         )
 
     def trace_tool_started(
@@ -261,7 +283,17 @@ class Tracer:
         success: bool,
         output_length: int,
         error: str | None = None,
+        tool_duration_ms: int | None = None,
     ) -> None:
+        payload: dict[str, Any] = {
+            "tool_name": tool_name,
+            "success": success,
+            "output_length": output_length,
+            "error": error,
+        }
+        if tool_duration_ms is not None:
+            payload["tool_duration_ms"] = tool_duration_ms
+
         self._emit(
             session_id=session_id,
             event_type="tool.finished",
@@ -271,12 +303,7 @@ class Tracer:
                 if success
                 else "Tool command failed."
             ),
-            payload={
-                "tool_name": tool_name,
-                "success": success,
-                "output_length": output_length,
-                "error": error,
-            },
+            payload=payload,
         )
 
     def trace_telegram_message_received(
@@ -305,18 +332,26 @@ class Tracer:
         session_id: str,
         provider: str | None,
         model_profile_name: str,
+        model_name: str | None = None,
+        model_duration_ms: int | None = None,
         error: str,
     ) -> None:
+        payload: dict[str, Any] = {
+            "provider": provider,
+            "model_profile_name": model_profile_name,
+            "error": error,
+        }
+        if model_name is not None:
+            payload["model_name"] = model_name
+        if model_duration_ms is not None:
+            payload["model_duration_ms"] = model_duration_ms
+
         self._emit(
             session_id=session_id,
             event_type="model.failed",
             level=EventLevel.ERROR,
             message="Model call failed.",
-            payload={
-                "provider": provider,
-                "model_profile_name": model_profile_name,
-                "error": error,
-            },
+            payload=payload,
         )
 
     def _emit(
