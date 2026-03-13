@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+from shlex import split as shlex_split
 
+from unclaw.core.executor import resolve_builtin_tool_command
 from unclaw.core.session_manager import SessionManager, SessionManagerError
 from unclaw.schemas.session import SessionSummary
 from unclaw.settings import ModelProfile, Settings
+from unclaw.tools.contracts import ToolCall
 
 
 class CommandStatus(StrEnum):
@@ -24,10 +27,21 @@ class CommandResult:
 
     status: CommandStatus
     lines: tuple[str, ...]
+    list_tools: bool = False
+    tool_call: ToolCall | None = None
 
     @property
     def should_exit(self) -> bool:
         return self.status is CommandStatus.EXIT
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedCommand:
+    """One parsed slash command with tokenized and raw arguments."""
+
+    name: str
+    arguments: tuple[str, ...]
+    raw_arguments: str
 
 
 @dataclass(slots=True)
@@ -63,41 +77,53 @@ class CommandHandler:
 
     def handle(self, raw_command: str) -> CommandResult:
         """Parse one slash command and return a structured result."""
-        normalized = raw_command.strip()
-        if not normalized.startswith("/"):
-            return self._error("Commands must start with '/'.")
-
-        if normalized == "/":
-            return self._error("Empty command. Use /help to list available commands.")
-
-        parts = normalized[1:].split()
-        command = parts[0].lower()
-        arguments = parts[1:]
+        try:
+            parsed_command = self._parse_command(raw_command)
+        except ValueError as exc:
+            return self._error(str(exc))
 
         try:
-            match command:
+            match parsed_command.name:
                 case "new":
-                    return self._handle_new(arguments)
+                    return self._handle_new(parsed_command.arguments)
                 case "sessions":
-                    return self._handle_sessions(arguments)
+                    return self._handle_sessions(parsed_command.arguments)
                 case "use":
-                    return self._handle_use(arguments)
+                    return self._handle_use(parsed_command.arguments)
                 case "model":
-                    return self._handle_model(arguments)
+                    return self._handle_model(parsed_command.arguments)
                 case "think":
-                    return self._handle_think(arguments)
+                    return self._handle_think(parsed_command.arguments)
+                case "tools":
+                    return self._handle_tools(parsed_command.arguments)
+                case "read":
+                    return self._handle_tool_command(
+                        parsed_command,
+                        usage_line="/read <path>",
+                    )
+                case "ls":
+                    return self._handle_tool_command(
+                        parsed_command,
+                        usage_line="/ls <path>",
+                    )
+                case "fetch":
+                    return self._handle_tool_command(
+                        parsed_command,
+                        usage_line="/fetch <url>",
+                    )
                 case "help":
-                    return self._handle_help(arguments)
+                    return self._handle_help(parsed_command.arguments)
                 case "exit":
-                    return self._handle_exit(arguments)
+                    return self._handle_exit(parsed_command.arguments)
                 case _:
                     return self._error(
-                        f"Unknown command '/{command}'. Use /help to list commands."
+                        f"Unknown command '/{parsed_command.name}'. "
+                        "Use /help to list commands."
                     )
         except SessionManagerError as exc:
             return self._error(str(exc))
 
-    def _handle_new(self, arguments: list[str]) -> CommandResult:
+    def _handle_new(self, arguments: tuple[str, ...]) -> CommandResult:
         if arguments:
             return self._usage("/new")
 
@@ -107,7 +133,7 @@ class CommandHandler:
             f"Title: {session.title}",
         )
 
-    def _handle_sessions(self, arguments: list[str]) -> CommandResult:
+    def _handle_sessions(self, arguments: tuple[str, ...]) -> CommandResult:
         if arguments:
             return self._usage("/sessions")
 
@@ -120,7 +146,7 @@ class CommandHandler:
             lines.append(self._format_session_line(session))
         return self._ok(*lines)
 
-    def _handle_use(self, arguments: list[str]) -> CommandResult:
+    def _handle_use(self, arguments: tuple[str, ...]) -> CommandResult:
         if len(arguments) != 1:
             return self._usage("/use <session_id>")
 
@@ -130,7 +156,7 @@ class CommandHandler:
             f"Title: {session.title}",
         )
 
-    def _handle_model(self, arguments: list[str]) -> CommandResult:
+    def _handle_model(self, arguments: tuple[str, ...]) -> CommandResult:
         if not arguments:
             profile = self.current_model_profile
             return self._ok(
@@ -164,7 +190,7 @@ class CommandHandler:
 
         return self._ok(*lines)
 
-    def _handle_think(self, arguments: list[str]) -> CommandResult:
+    def _handle_think(self, arguments: tuple[str, ...]) -> CommandResult:
         if not arguments:
             lines = [f"Thinking mode: {self.thinking_label}"]
             if not self.current_model_profile.thinking_supported:
@@ -190,25 +216,72 @@ class CommandHandler:
         self.thinking_enabled = value == "on"
         return self._ok(f"Thinking mode: {self.thinking_label}")
 
-    def _handle_help(self, arguments: list[str]) -> CommandResult:
+    def _handle_tools(self, arguments: tuple[str, ...]) -> CommandResult:
+        if arguments:
+            return self._usage("/tools")
+        return CommandResult(
+            status=CommandStatus.OK,
+            lines=(),
+            list_tools=True,
+        )
+
+    def _handle_tool_command(
+        self,
+        parsed_command: ParsedCommand,
+        *,
+        usage_line: str,
+    ) -> CommandResult:
+        argument_value = self._read_freeform_argument(parsed_command)
+        if argument_value is None:
+            return self._usage(usage_line)
+
+        tool_name = resolve_builtin_tool_command(parsed_command.name)
+        if tool_name is None:
+            return self._error(
+                f"Unknown tool command '/{parsed_command.name}'. "
+                "Use /help to list commands."
+            )
+
+        argument_key = "url" if parsed_command.name == "fetch" else "path"
+        return CommandResult(
+            status=CommandStatus.OK,
+            lines=(),
+            tool_call=ToolCall(
+                tool_name=tool_name,
+                arguments={argument_key: argument_value},
+            ),
+        )
+
+    def _handle_help(self, arguments: tuple[str, ...]) -> CommandResult:
         if arguments:
             return self._usage("/help")
 
         return self._ok(
             "Available commands:",
+            "Sessions:",
             "/new",
             "/sessions",
             "/use <session_id>",
+            "Models:",
             "/model",
             "/model <profile_name>",
             "/think",
             "/think on",
             "/think off",
+            "Tools:",
+            "/tools",
+            "/read <path>",
+            "/ls <path>",
+            "/fetch <url>",
+            "Memory:",
+            "/session",
+            "/summary",
+            "Other:",
             "/help",
             "/exit",
         )
 
-    def _handle_exit(self, arguments: list[str]) -> CommandResult:
+    def _handle_exit(self, arguments: tuple[str, ...]) -> CommandResult:
         if arguments:
             return self._usage("/exit")
         return CommandResult(status=CommandStatus.EXIT, lines=("Exiting Unclaw.",))
@@ -220,6 +293,40 @@ class CommandHandler:
             f"updated {session.updated_at}"
         )
 
+    def _parse_command(self, raw_command: str) -> ParsedCommand:
+        normalized = raw_command.strip()
+        if not normalized.startswith("/"):
+            raise ValueError("Commands must start with '/'.")
+        if normalized == "/":
+            raise ValueError("Empty command. Use /help to list available commands.")
+
+        command_text = normalized[1:]
+        command_name, _, raw_arguments = command_text.partition(" ")
+        if not command_name:
+            raise ValueError("Empty command. Use /help to list available commands.")
+
+        try:
+            arguments = tuple(shlex_split(raw_arguments)) if raw_arguments else ()
+        except ValueError as exc:
+            raise ValueError(f"Could not parse command arguments: {exc}") from exc
+
+        return ParsedCommand(
+            name=command_name.lower(),
+            arguments=arguments,
+            raw_arguments=raw_arguments,
+        )
+
+    def _read_freeform_argument(self, parsed_command: ParsedCommand) -> str | None:
+        raw_value = parsed_command.raw_arguments.strip()
+        if not raw_value:
+            return None
+
+        if len(parsed_command.arguments) == 1:
+            value = parsed_command.arguments[0].strip()
+            return value or None
+
+        return raw_value
+
     def _ok(self, *lines: str) -> CommandResult:
         return CommandResult(status=CommandStatus.OK, lines=tuple(lines))
 
@@ -228,4 +335,3 @@ class CommandHandler:
 
     def _usage(self, usage_line: str) -> CommandResult:
         return self._error(f"Usage: {usage_line}")
-

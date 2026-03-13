@@ -6,6 +6,7 @@ import sys
 
 from unclaw.bootstrap import bootstrap
 from unclaw.core.command_handler import CommandHandler, CommandResult, CommandStatus
+from unclaw.core.executor import ToolExecutor
 from unclaw.core.runtime import run_user_turn
 from unclaw.core.session_manager import SessionManager
 from unclaw.errors import UnclawError
@@ -14,6 +15,7 @@ from unclaw.logs.tracer import Tracer
 from unclaw.memory import MemoryManager
 from unclaw.schemas.chat import MessageRole
 from unclaw.settings import Settings
+from unclaw.tools.contracts import ToolDefinition, ToolResult
 
 
 def main() -> int:
@@ -28,6 +30,7 @@ def main() -> int:
             event_bus=event_bus,
             event_repository=session_manager.event_repository,
         )
+        tool_executor = ToolExecutor.with_default_tools()
         command_handler = CommandHandler(
             settings=settings,
             session_manager=session_manager,
@@ -47,6 +50,7 @@ def main() -> int:
             command_handler=command_handler,
             memory_manager=memory_manager,
             tracer=tracer,
+            tool_executor=tool_executor,
         )
     finally:
         session_manager.close()
@@ -58,6 +62,7 @@ def run_cli(
     command_handler: CommandHandler,
     memory_manager: MemoryManager,
     tracer: Tracer,
+    tool_executor: ToolExecutor,
 ) -> int:
     """Run the interactive read-eval-print loop."""
     while True:
@@ -86,10 +91,13 @@ def run_cli(
                 continue
 
             result = command_handler.handle(stripped_input)
+            if result.list_tools:
+                _render_tool_list(tool_executor.list_tools())
+                continue
+            if result.tool_call is not None:
+                _render_tool_result(tool_executor.execute(result.tool_call))
+                continue
             _render_command_result(result)
-            if stripped_input == "/help" and result.status is CommandStatus.OK:
-                print("/session")
-                print("/summary")
             if result.should_exit:
                 return 0
             continue
@@ -126,7 +134,7 @@ def _print_banner(
         f"Model: {command_handler.current_model_profile_name} | "
         f"Thinking: {command_handler.thinking_label}"
     )
-    print("Type /help for commands. Use /session or /summary for memory.")
+    print("Type /help for commands.")
 
 
 def _build_prompt(command_handler: CommandHandler) -> str:
@@ -149,6 +157,47 @@ def _render_command_result(result: CommandResult) -> None:
         return
 
     for line in result.lines:
+        print(line)
+
+
+def _render_tool_list(tools: list[ToolDefinition]) -> None:
+    if not tools:
+        print("No built-in tools available.")
+        return
+
+    name_width = max(len("Name"), *(len(tool.name) for tool in tools))
+    permission_width = max(
+        len("Permission"),
+        *(len(tool.permission_level.value) for tool in tools),
+    )
+
+    print("Built-in tools:")
+    print(
+        f"{'Name'.ljust(name_width)}  "
+        f"{'Permission'.ljust(permission_width)}  "
+        "Description"
+    )
+    for tool in tools:
+        print(
+            f"{tool.name.ljust(name_width)}  "
+            f"{tool.permission_level.value.ljust(permission_width)}  "
+            f"{tool.description}"
+        )
+
+
+def _render_tool_result(result: ToolResult) -> None:
+    if result.success:
+        print(result.output_text)
+        return
+
+    if not result.output_text:
+        print(f"Error: {result.error}")
+        return
+
+    lines = result.output_text.splitlines() or [result.output_text]
+    first_line, *other_lines = lines
+    print(f"Error: {first_line}")
+    for line in other_lines:
         print(line)
 
 
