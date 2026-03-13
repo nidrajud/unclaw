@@ -33,6 +33,7 @@ class Tracer:
     event_repository: EventRepository | None = None
     persist_events: bool = True
     runtime_log_path: Path | None = None
+    include_reasoning_text: bool = False
 
     def trace_channel_started(
         self,
@@ -225,8 +226,9 @@ class Tracer:
         if model_duration_ms is not None:
             payload["model_duration_ms"] = model_duration_ms
         if reasoning is not None and reasoning.strip():
-            payload["reasoning_text"] = reasoning
             payload["reasoning_length"] = len(reasoning)
+            if self.include_reasoning_text:
+                payload["reasoning_text"] = reasoning
 
         self._emit(
             session_id=session_id,
@@ -323,6 +325,42 @@ class Tracer:
                 "chat_id": chat_id,
                 "text_length": text_length,
                 "is_command": is_command,
+            },
+        )
+
+    def trace_telegram_chat_rejected(
+        self,
+        *,
+        chat_id: int,
+        reason: str,
+    ) -> None:
+        self._emit(
+            session_id=None,
+            event_type="telegram.chat.rejected",
+            level=EventLevel.WARNING,
+            message="Telegram chat rejected.",
+            payload={
+                "chat_id": chat_id,
+                "reason": reason,
+            },
+        )
+
+    def trace_telegram_rate_limited(
+        self,
+        *,
+        chat_id: int,
+        pending_messages: int,
+        max_pending_messages: int,
+    ) -> None:
+        self._emit(
+            session_id=None,
+            event_type="telegram.rate_limited",
+            level=EventLevel.WARNING,
+            message="Telegram message rejected by rate limit.",
+            payload={
+                "chat_id": chat_id,
+                "pending_messages": pending_messages,
+                "max_pending_messages": max_pending_messages,
             },
         )
 

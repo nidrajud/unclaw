@@ -777,6 +777,19 @@ def run_onboarding(
         output_func(
             f"- Your bot token is stored locally in `{local_secrets_path(configured_settings)}`."
         )
+        if plan.telegram_allowed_chat_ids:
+            count = len(plan.telegram_allowed_chat_ids)
+            label = "chat" if count == 1 else "chats"
+            output_func(
+                f"- Telegram access: {count} authorized {label} already configured in `config/telegram.yaml`."
+            )
+        else:
+            output_func(
+                "- Telegram access: secure deny-by-default until you add chat IDs to `config/telegram.yaml`."
+            )
+            output_func(
+                "- Tip: send one test message, then check `unclaw logs simple` for the rejected `chat_id` to allowlist."
+            )
         output_func(
             f"- Advanced fallback: export {plan.telegram_bot_token_env_var}=<your bot token>"
         )
@@ -836,6 +849,7 @@ def build_onboarding_file_payloads(
             "console_enabled": settings.app.logging.console_enabled,
             "file_enabled": settings.app.logging.file_enabled,
             "file_name": settings.app.logging.file_name,
+            "include_reasoning_text": False,
         },
         "channels": {
             "terminal_enabled": "terminal" in plan.enabled_channels,
@@ -1256,6 +1270,9 @@ def _prompt_telegram_bot_token(
     prompt_ui.info("Example format: 123456789:AA...")
     prompt_ui.info("The token stays visible while you type so you can verify the paste.")
     prompt_ui.info(
+        "Secure by default: `allowed_chat_ids: []` denies all Telegram chats until you authorize one explicitly."
+    )
+    prompt_ui.info(
         "Advanced fallback: `unclaw telegram` can still read "
         f"`{DEFAULT_TELEGRAM_TOKEN_ENV_VAR}` from the environment."
     )
@@ -1326,6 +1343,12 @@ def _print_plan_summary(plan: OnboardingPlan, *, output_func: OutputFunc) -> Non
         output_func(
             f"- Telegram env fallback: {plan.telegram_bot_token_env_var}"
         )
+        if plan.telegram_allowed_chat_ids:
+            count = len(plan.telegram_allowed_chat_ids)
+            label = "chat" if count == 1 else "chats"
+            output_func(f"- Telegram access: allowlist with {count} authorized {label}")
+        else:
+            output_func("- Telegram access: secure deny-by-default (no chats authorized yet)")
 
 
 def _write_yaml(path: Path, payload: dict[str, object]) -> None:

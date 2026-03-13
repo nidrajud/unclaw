@@ -39,6 +39,9 @@ def run_user_turn(
     active_tracer = tracer or Tracer(
         event_bus=event_bus or EventBus(),
         event_repository=session_manager.event_repository,
+        include_reasoning_text=(
+            session_manager.settings.app.logging.include_reasoning_text
+        ),
     )
     active_tracer.runtime_log_path = (
         session_manager.settings.paths.log_file_path

@@ -15,6 +15,7 @@ logging:
   console_enabled: true
   file_enabled: true
   file_name: runtime.log
+  include_reasoning_text: false
 channels:
   terminal_enabled: true
   telegram_enabled: true

@@ -4,6 +4,8 @@ import json
 import shutil
 from pathlib import Path
 
+import yaml
+
 from unclaw.logs.cli import render_simple_log_line, run_logs
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
@@ -87,6 +89,7 @@ def test_run_logs_defaults_to_simple_live_view_when_follow_is_disabled(
     assert outputs[0] == "Unclaw logs"
     assert "Mode: simple" in outputs
     assert f"Runtime log: {log_path.resolve()}" in outputs
+    assert "Reasoning text: redacted by default unless explicitly enabled." in outputs
     assert "Recent activity:" in outputs
     assert any("model selected | main -> qwen3.5:4b | provider=ollama" in line for line in outputs)
     assert any(
@@ -135,6 +138,7 @@ def test_run_logs_full_shows_raw_lines_when_follow_is_disabled(tmp_path: Path) -
     assert outputs[0] == "Unclaw logs"
     assert "Mode: full" in outputs
     assert "View: raw JSON runtime log stream" in outputs
+    assert "Reasoning text: redacted by default unless explicitly enabled." in outputs
     assert "plain raw line" in outputs
     assert any('"event_type": "assistant.reply.persisted"' in line for line in outputs)
     assert any('"turn_duration_ms": 640' in line for line in outputs)
@@ -199,7 +203,9 @@ def test_render_simple_log_line_shows_tool_durations_and_failures() -> None:
     )
 
 
-def test_tracer_writes_duration_and_reasoning_fields_to_runtime_log(tmp_path: Path) -> None:
+def test_tracer_writes_reasoning_length_without_reasoning_text_by_default(
+    tmp_path: Path,
+) -> None:
     log_path = tmp_path / "runtime.log"
     tracer = Tracer(
         event_bus=EventBus(),
@@ -235,10 +241,102 @@ def test_tracer_writes_duration_and_reasoning_fields_to_runtime_log(tmp_path: Pa
     reply_event = json.loads(lines[2])
 
     assert model_event["payload"]["model_duration_ms"] == 321
-    assert model_event["payload"]["reasoning_text"] == "chain"
     assert model_event["payload"]["reasoning_length"] == 5
+    assert "reasoning_text" not in model_event["payload"]
     assert tool_event["payload"]["tool_duration_ms"] == 9
     assert reply_event["payload"]["turn_duration_ms"] == 654
+
+
+def test_tracer_can_opt_in_to_reasoning_text_logging(tmp_path: Path) -> None:
+    log_path = tmp_path / "runtime.log"
+    tracer = Tracer(
+        event_bus=EventBus(),
+        persist_events=False,
+        runtime_log_path=log_path,
+        include_reasoning_text=True,
+    )
+
+    tracer.trace_model_succeeded(
+        session_id="sess-1",
+        provider="ollama",
+        model_name="qwen3.5:4b",
+        finish_reason="stop",
+        output_length=128,
+        reasoning="chain",
+    )
+
+    model_event = json.loads(log_path.read_text(encoding="utf-8").splitlines()[0])
+
+    assert model_event["payload"]["reasoning_text"] == "chain"
+    assert model_event["payload"]["reasoning_length"] == 5
+
+
+def test_run_logs_full_redacts_reasoning_text_when_disabled(tmp_path: Path) -> None:
+    project_root = _create_temp_project(tmp_path)
+    log_path = project_root / "data" / "logs" / "runtime.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(
+        _runtime_event_line(
+            event_type="model.succeeded",
+            message="Model call finished successfully.",
+            payload={
+                "provider": "ollama",
+                "model_name": "qwen3.5:4b",
+                "output_length": 84,
+                "reasoning_length": 5,
+                "reasoning_text": "chain",
+            },
+            session_id="sess-1",
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    outputs: list[str] = []
+    result = run_logs(
+        project_root=project_root,
+        mode="full",
+        output_func=outputs.append,
+        follow=False,
+    )
+
+    assert result == 0
+    assert any('"reasoning_length": 5' in line for line in outputs)
+    assert not any('"reasoning_text": "chain"' in line for line in outputs)
+
+
+def test_run_logs_full_shows_reasoning_text_when_opted_in(tmp_path: Path) -> None:
+    project_root = _create_temp_project(tmp_path)
+    _set_include_reasoning_text(project_root, True)
+    log_path = project_root / "data" / "logs" / "runtime.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(
+        _runtime_event_line(
+            event_type="model.succeeded",
+            message="Model call finished successfully.",
+            payload={
+                "provider": "ollama",
+                "model_name": "qwen3.5:4b",
+                "output_length": 84,
+                "reasoning_length": 5,
+                "reasoning_text": "chain",
+            },
+            session_id="sess-1",
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    outputs: list[str] = []
+    result = run_logs(
+        project_root=project_root,
+        mode="full",
+        output_func=outputs.append,
+        follow=False,
+    )
+
+    assert result == 0
+    assert any('"reasoning_text": "chain"' in line for line in outputs)
 
 
 def _create_temp_project(tmp_path: Path) -> Path:
@@ -246,6 +344,19 @@ def _create_temp_project(tmp_path: Path) -> Path:
     project_root = tmp_path / "project"
     shutil.copytree(source_root / "config", project_root / "config")
     return project_root
+
+
+def _set_include_reasoning_text(project_root: Path, enabled: bool) -> None:
+    app_config_path = project_root / "config" / "app.yaml"
+    payload = yaml.safe_load(app_config_path.read_text(encoding="utf-8"))
+    assert isinstance(payload, dict)
+    logging_payload = payload.get("logging")
+    assert isinstance(logging_payload, dict)
+    logging_payload["include_reasoning_text"] = enabled
+    app_config_path.write_text(
+        yaml.safe_dump(payload, sort_keys=False),
+        encoding="utf-8",
+    )
 
 
 def _runtime_event_line(

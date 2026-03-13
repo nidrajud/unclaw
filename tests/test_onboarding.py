@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import stat
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ import yaml
 import unclaw.onboarding as onboarding
 from unclaw.channels.telegram_bot import load_telegram_config
 from unclaw.errors import ConfigurationError
+from unclaw.local_secrets import LocalSecrets, write_local_secrets
 from unclaw.onboarding import (
     InteractivePromptUI,
     MenuOption,
@@ -58,6 +60,7 @@ def test_recommended_onboarding_writes_terminal_and_telegram_preset(
     secrets_payload = _read_yaml(project_root / "config" / "secrets.yaml")
 
     assert app_payload["logging"]["mode"] == "simple"
+    assert app_payload["logging"]["include_reasoning_text"] is False
     assert app_payload["channels"] == {
         "terminal_enabled": True,
         "telegram_enabled": True,
@@ -72,9 +75,12 @@ def test_recommended_onboarding_writes_terminal_and_telegram_preset(
     assert any("BotFather" in line for line in outputs)
     assert any("config/secrets.yaml" in line for line in outputs)
     assert any("visible while you type" in line for line in outputs)
+    assert any("Secure by default" in line for line in outputs)
+    assert any("deny-by-default" in line for line in outputs)
     assert any("Ollama is not installed yet." in line for line in outputs)
     assert any("stored locally" in line for line in outputs)
     assert any("unclaw telegram" in line for line in outputs)
+    assert stat.S_IMODE((project_root / "config" / "secrets.yaml").stat().st_mode) == 0o600
 
 
 def test_advanced_onboarding_can_choose_installed_and_custom_models(
@@ -310,6 +316,23 @@ def test_load_telegram_config_rejects_pasted_bot_token(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigurationError, match="environment variable name"):
         load_telegram_config(settings)
+
+
+def test_write_local_secrets_rewrites_permissions_to_owner_only(
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    secrets_path = project_root / "config" / "secrets.yaml"
+    secrets_path.write_text("telegram:\n  bot_token: stale\n", encoding="utf-8")
+    secrets_path.chmod(0o644)
+
+    write_local_secrets(
+        settings,
+        LocalSecrets(telegram_bot_token=EXAMPLE_TELEGRAM_TOKEN),
+    )
+
+    assert stat.S_IMODE(secrets_path.stat().st_mode) == 0o600
 
 
 def _create_temp_project(tmp_path: Path) -> Path:

@@ -36,6 +36,8 @@ _SIMPLE_EVENT_TYPES = frozenset(
         "tool.finished",
         "model.failed",
         "telegram.message.received",
+        "telegram.chat.rejected",
+        "telegram.rate_limited",
     }
 )
 
@@ -48,6 +50,7 @@ class LogView:
     log_path: Path
     log_exists: bool
     file_logging_enabled: bool
+    include_reasoning_text: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +146,7 @@ def build_log_view(settings: Settings, *, mode: str) -> LogView:
         log_path=log_path,
         log_exists=log_path.is_file(),
         file_logging_enabled=settings.app.logging.file_enabled,
+        include_reasoning_text=settings.app.logging.include_reasoning_text,
     )
 
 
@@ -165,6 +169,8 @@ def format_log_header(log_view: LogView, *, follow: bool) -> tuple[str, ...]:
         lines.append(
             "Note: `logging.file_enabled` is off, so this file may not update until it is enabled again."
         )
+    if not log_view.include_reasoning_text:
+        lines.append("Reasoning text: redacted by default unless explicitly enabled.")
     return tuple(lines)
 
 
@@ -337,13 +343,30 @@ def render_simple_log_line(raw_line: str) -> str | None:
                 f"[{timestamp}] telegram message | session={event.session_id} | "
                 f"chat={payload.get('chat_id', '?')} | command={'yes' if is_command else 'no'}"
             )
+        case "telegram.chat.rejected":
+            return (
+                f"[{timestamp}] telegram rejected | chat={payload.get('chat_id', '?')} | "
+                f"reason={payload.get('reason', '?')}"
+            )
+        case "telegram.rate_limited":
+            return (
+                f"[{timestamp}] telegram rate limit | chat={payload.get('chat_id', '?')} | "
+                f"pending={payload.get('pending_messages', '?')} | "
+                f"max={payload.get('max_pending_messages', '?')}"
+            )
         case _:
             return f"[{timestamp}] {event.level} {event.event_type} | {event.message}"
 
 
 def _render_initial_lines(log_view: LogView, raw_lines: tuple[str, ...]) -> tuple[str, ...]:
     if log_view.mode == "full":
-        return raw_lines[-_FULL_TAIL_LINES:]
+        return tuple(
+            _render_full_log_line(
+                raw_line,
+                include_reasoning_text=log_view.include_reasoning_text,
+            )
+            for raw_line in raw_lines[-_FULL_TAIL_LINES:]
+        )
 
     rendered_lines = tuple(
         rendered_line
@@ -368,7 +391,10 @@ def _follow_log_stream(
             if line:
                 current_position = handle.tell()
                 rendered_line = (
-                    line.rstrip("\n")
+                    _render_full_log_line(
+                        line,
+                        include_reasoning_text=log_view.include_reasoning_text,
+                    )
                     if log_view.mode == "full"
                     else render_simple_log_line(line)
                 )
@@ -429,6 +455,30 @@ def _format_reasoning_label(payload: dict[str, Any]) -> str | None:
         return f"reasoning={len(reasoning_text)} chars"
 
     return None
+
+
+def _render_full_log_line(raw_line: str, *, include_reasoning_text: bool) -> str:
+    line = raw_line.rstrip("\n")
+    if include_reasoning_text or not line:
+        return line
+
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError:
+        return line
+
+    if not isinstance(payload, dict):
+        return line
+
+    event_payload = payload.get("payload")
+    if not isinstance(event_payload, dict) or "reasoning_text" not in event_payload:
+        return line
+
+    sanitized_payload = dict(payload)
+    sanitized_event_payload = dict(event_payload)
+    sanitized_event_payload.pop("reasoning_text", None)
+    sanitized_payload["payload"] = sanitized_event_payload
+    return json.dumps(sanitized_payload, sort_keys=True)
 
 
 def _format_tool_argument_summary(arguments: object) -> str | None:

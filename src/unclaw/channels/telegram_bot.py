@@ -7,6 +7,7 @@ import logging
 import sqlite3
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ from unclaw.core.session_manager import SessionManager
 from unclaw.errors import ConfigurationError, UnclawError
 from unclaw.llm.base import utc_now_iso
 from unclaw.local_secrets import (
+    sanitize_telegram_text,
     resolve_telegram_bot_token,
     validate_telegram_token_env_var_name,
 )
@@ -40,6 +42,12 @@ _TELEGRAM_CONFIG_FILE_NAME = "telegram.yaml"
 _TELEGRAM_API_BASE_URL = "https://api.telegram.org"
 _POLL_RETRY_DELAY_SECONDS = 3.0
 _MESSAGE_LIMIT = 4000
+_MAX_PENDING_MESSAGES_PER_CHAT = 2
+_UNAUTHORIZED_CHAT_MESSAGE = "This chat is not authorized for this Unclaw bot."
+_RATE_LIMITED_CHAT_MESSAGE = (
+    "Too many messages arrived before the previous reply finished. "
+    "Please wait for the next reply, then send another message."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,8 +59,6 @@ class TelegramConfig:
     allowed_chat_ids: frozenset[int]
 
     def is_chat_allowed(self, chat_id: int) -> bool:
-        if not self.allowed_chat_ids:
-            return True
         return chat_id in self.allowed_chat_ids
 
 
@@ -117,15 +123,23 @@ class TelegramApiClient:
                 raw_body = response.read().decode("utf-8")
         except HTTPError as exc:
             raise TelegramApiError(
-                f"Telegram API request failed with HTTP {exc.code}: "
-                f"{_read_http_error_body(exc)}"
+                self._sanitize_error_message(
+                    f"Telegram API request failed with HTTP {exc.code}: "
+                    f"{_read_http_error_body(exc)}"
+                )
             ) from exc
         except URLError as exc:
             raise TelegramApiError(
-                f"Could not reach the Telegram API: {exc.reason}"
+                self._sanitize_error_message(
+                    f"Could not reach the Telegram API: {exc.reason}"
+                )
             ) from exc
         except OSError as exc:
-            raise TelegramApiError(f"Telegram API request failed: {exc}") from exc
+            raise TelegramApiError(
+                self._sanitize_error_message(
+                    f"Telegram API request failed: {exc}"
+                )
+            ) from exc
 
         try:
             payload = json.loads(raw_body)
@@ -137,10 +151,23 @@ class TelegramApiClient:
         if payload.get("ok") is not True:
             description = payload.get("description")
             if isinstance(description, str) and description.strip():
-                raise TelegramApiError(description.strip())
+                raise TelegramApiError(
+                    self._sanitize_error_message(description.strip())
+                )
             raise TelegramApiError("Telegram returned an unsuccessful response.")
 
         return payload.get("result")
+
+    def _sanitize_error_message(self, message: str) -> str:
+        return sanitize_telegram_text(message, known_token=self.bot_token)
+
+
+@dataclass(slots=True)
+class TelegramChatRateLimitState:
+    """Track queued messages for one chat across polling batches."""
+
+    last_reply_sent_at: int | None = None
+    pending_messages_since_reply: int = 0
 
 
 @dataclass(slots=True)
@@ -215,6 +242,11 @@ class TelegramBotChannel:
     api_client: TelegramApiClient
     session_store: TelegramChatSessionStore
     command_handlers: dict[int, CommandHandler] = field(default_factory=dict)
+    rate_limit_states: dict[int, TelegramChatRateLimitState] = field(
+        default_factory=dict
+    )
+    max_pending_messages_per_chat: int = _MAX_PENDING_MESSAGES_PER_CHAT
+    clock: Callable[[], float] = time.time
 
     def run(self) -> None:
         bot_profile = self.api_client.get_me()
@@ -228,9 +260,10 @@ class TelegramBotChannel:
             },
         )
         LOGGER.info(
-            "Telegram polling started for @%s with timeout=%ss",
+            "Telegram polling started for @%s with timeout=%ss access=%s",
             username,
             self.config.polling_timeout_seconds,
+            _format_telegram_access_mode(self.config),
         )
 
         next_update_offset: int | None = None
@@ -271,10 +304,14 @@ class TelegramBotChannel:
             return
 
         if not self.config.is_chat_allowed(chat_id):
-            LOGGER.warning("Ignoring message from unauthorized chat %s", chat_id)
+            self.tracer.trace_telegram_chat_rejected(
+                chat_id=chat_id,
+                reason="unauthorized",
+            )
+            LOGGER.warning("Rejected Telegram message from unauthorized chat=%s", chat_id)
             self._send_reply(
                 chat_id=chat_id,
-                text="This Unclaw bot is not allowed in this chat.",
+                text=_UNAUTHORIZED_CHAT_MESSAGE,
             )
             return
 
@@ -284,6 +321,13 @@ class TelegramBotChannel:
                 chat_id=chat_id,
                 text="Please send a text message or a slash command.",
             )
+            return
+
+        message_timestamp = _read_message_timestamp(message)
+        if self._is_rate_limited(
+            chat_id=chat_id,
+            message_timestamp=message_timestamp,
+        ):
             return
 
         active_session = self._activate_chat_session(chat_id)
@@ -428,9 +472,58 @@ class TelegramBotChannel:
             return
         self.session_store.bind_chat(chat_id=chat_id, session_id=current_session_id)
 
+    def _is_rate_limited(
+        self,
+        *,
+        chat_id: int,
+        message_timestamp: int | None,
+    ) -> bool:
+        state = self._get_rate_limit_state(chat_id)
+        if (
+            message_timestamp is None
+            or state.last_reply_sent_at is None
+            or message_timestamp >= state.last_reply_sent_at
+        ):
+            state.pending_messages_since_reply = 0
+            return False
+
+        pending_messages = state.pending_messages_since_reply + 1
+        if pending_messages <= self.max_pending_messages_per_chat:
+            state.pending_messages_since_reply = pending_messages
+            return False
+
+        self.tracer.trace_telegram_rate_limited(
+            chat_id=chat_id,
+            pending_messages=pending_messages,
+            max_pending_messages=self.max_pending_messages_per_chat,
+        )
+        LOGGER.warning(
+            "Rejected Telegram burst for chat=%s pending=%s max=%s",
+            chat_id,
+            pending_messages,
+            self.max_pending_messages_per_chat,
+        )
+        self._send_reply(chat_id=chat_id, text=_RATE_LIMITED_CHAT_MESSAGE)
+        return True
+
+    def _get_rate_limit_state(self, chat_id: int) -> TelegramChatRateLimitState:
+        state = self.rate_limit_states.get(chat_id)
+        if state is None:
+            state = TelegramChatRateLimitState()
+            self.rate_limit_states[chat_id] = state
+        return state
+
+    def _mark_reply_sent(self, chat_id: int) -> None:
+        state = self._get_rate_limit_state(chat_id)
+        state.last_reply_sent_at = int(self.clock())
+
     def _send_reply(self, *, chat_id: int, text: str) -> None:
+        sent_any = False
         for chunk in _split_message_chunks(text):
             self.api_client.send_message(chat_id=chat_id, text=chunk)
+            sent_any = True
+        if sent_any:
+            self._mark_reply_sent(chat_id)
 
 
 def load_telegram_config(settings: Settings) -> TelegramConfig:
@@ -475,6 +568,7 @@ def main(project_root: Path | None = None) -> int:
                 if profile_name != settings.app.default_model_profile
             ),
             telegram_token_env_var=telegram_config.bot_token_env_var,
+            telegram_allowed_chat_ids=telegram_config.allowed_chat_ids,
         )
         print(
             build_banner(
@@ -491,6 +585,7 @@ def main(project_root: Path | None = None) -> int:
                     ),
                     ("logging", settings.app.logging.mode),
                     ("polling", f"{telegram_config.polling_timeout_seconds}s"),
+                    ("access", _format_telegram_access_mode(telegram_config)),
                 ),
             )
         )
@@ -516,6 +611,7 @@ def main(project_root: Path | None = None) -> int:
         tracer = Tracer(
             event_bus=event_bus,
             event_repository=session_manager.event_repository,
+            include_reasoning_text=settings.app.logging.include_reasoning_text,
         )
         tracer.runtime_log_path = (
             settings.paths.log_file_path if settings.app.logging.file_enabled else None
@@ -641,6 +737,13 @@ def _read_allowed_chat_ids(value: Any) -> frozenset[int]:
     return frozenset(chat_ids)
 
 
+def _read_message_timestamp(message: dict[str, Any]) -> int | None:
+    value = message.get("date")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
 def _normalize_telegram_command(text: str) -> str:
     command, separator, remainder = text.partition(" ")
     command_name, mention_separator, _mention = command.partition("@")
@@ -708,6 +811,15 @@ def _split_message_chunks(text: str, *, limit: int = _MESSAGE_LIMIT) -> list[str
 
 def _elapsed_ms(started_at: float) -> int:
     return max(0, round((time.perf_counter() - started_at) * 1000))
+
+
+def _format_telegram_access_mode(config: TelegramConfig) -> str:
+    authorized_count = len(config.allowed_chat_ids)
+    if authorized_count == 0:
+        return "deny-by-default (0 chats)"
+    if authorized_count == 1:
+        return "allowlist (1 chat)"
+    return f"allowlist ({authorized_count} chats)"
 
 
 def _read_http_error_body(exc: HTTPError) -> str:

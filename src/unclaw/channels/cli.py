@@ -88,6 +88,7 @@ def main(project_root: Path | None = None) -> int:
         tracer = Tracer(
             event_bus=event_bus,
             event_repository=session_manager.event_repository,
+            include_reasoning_text=settings.app.logging.include_reasoning_text,
         )
         tracer.runtime_log_path = (
             settings.paths.log_file_path if settings.app.logging.file_enabled else None

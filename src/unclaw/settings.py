@@ -45,6 +45,7 @@ class LoggingSettings:
     console_enabled: bool
     file_enabled: bool
     file_name: str
+    include_reasoning_text: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,6 +218,11 @@ def _build_app_settings(payload: Mapping[str, Any]) -> AppSettings:
         console_enabled=_get_bool(logging_section, "console_enabled", True),
         file_enabled=_get_bool(logging_section, "file_enabled", True),
         file_name=_get_str(logging_section, "file_name", LOG_FILE_NAME),
+        include_reasoning_text=_get_bool(
+            logging_section,
+            "include_reasoning_text",
+            False,
+        ),
     )
     channel_settings = ChannelSettings(
         terminal_enabled=_get_bool(channels_section, "terminal_enabled", True),

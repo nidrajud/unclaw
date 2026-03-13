@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,8 @@ DEFAULT_TELEGRAM_TOKEN_ENV_VAR = "TELEGRAM_BOT_TOKEN"
 
 _ENV_VAR_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _TELEGRAM_BOT_TOKEN_PATTERN = re.compile(r"^\d{6,}:[A-Za-z0-9_-]{20,}$")
+_TELEGRAM_TOKEN_IN_TEXT_PATTERN = re.compile(r"\d{6,}:[A-Za-z0-9_-]{20,}")
+_LOCAL_SECRETS_MODE = 0o600
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +87,40 @@ def validate_telegram_token_env_var_name(value: str) -> str:
     return normalized
 
 
+def mask_telegram_bot_token(value: str) -> str:
+    """Mask one Telegram bot token while keeping it recognizable."""
+
+    normalized = value.strip()
+    if not normalized:
+        return normalized
+
+    bot_id, separator, secret = normalized.partition(":")
+    if not separator:
+        return "***"
+
+    visible_prefix = secret[:2]
+    visible_suffix = secret[-4:] if len(secret) > 4 else secret
+    if len(secret) <= 6:
+        return f"{bot_id}:{visible_prefix}"
+    return f"{bot_id}:{visible_prefix}...{visible_suffix}"
+
+
+def sanitize_telegram_text(value: str, *, known_token: str | None = None) -> str:
+    """Mask Telegram bot tokens embedded in URLs, errors, or free-form text."""
+
+    sanitized = value
+    if known_token:
+        sanitized = sanitized.replace(
+            known_token,
+            mask_telegram_bot_token(known_token),
+        )
+
+    return _TELEGRAM_TOKEN_IN_TEXT_PATTERN.sub(
+        lambda match: mask_telegram_bot_token(match.group(0)),
+        sanitized,
+    )
+
+
 def load_local_secrets(settings: Settings) -> LocalSecrets:
     """Load the optional project-local secrets file."""
 
@@ -145,6 +182,7 @@ def write_local_secrets(settings: Settings, secrets: LocalSecrets) -> None:
         ),
         encoding="utf-8",
     )
+    _ensure_local_secrets_permissions(path)
 
 
 def resolve_telegram_bot_token(
@@ -196,3 +234,16 @@ def _load_optional_yaml_mapping(path: Path) -> dict[str, Any]:
             f"Local secrets file must contain a mapping: {path}"
         )
     return dict(payload)
+
+
+def _ensure_local_secrets_permissions(path: Path) -> None:
+    try:
+        os.chmod(path, _LOCAL_SECRETS_MODE)
+    except OSError:
+        warnings.warn(
+            (
+                "Unclaw could not enforce owner-only permissions on the local "
+                f"secrets file: {path}"
+            ),
+            stacklevel=2,
+        )

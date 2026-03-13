@@ -175,6 +175,7 @@ def build_startup_report(
     required_profile_names: tuple[str, ...],
     optional_profile_names: tuple[str, ...] = (),
     telegram_token_env_var: str | None = None,
+    telegram_allowed_chat_ids: frozenset[int] | None = None,
 ) -> StartupReport:
     """Build a user-facing startup report for one channel."""
 
@@ -222,6 +223,10 @@ def build_startup_report(
                 settings,
                 bot_token_env_var=telegram_token_env_var,
             )
+        )
+    if telegram_allowed_chat_ids is not None:
+        checks.append(
+            _build_telegram_access_check(allowed_chat_ids=telegram_allowed_chat_ids)
         )
 
     return StartupReport(channel_name=channel_name, checks=tuple(checks))
@@ -494,6 +499,33 @@ def _build_telegram_token_check(
         guidance=(
             "Run `unclaw onboard` and paste your bot token. Advanced fallback: "
             f"export {bot_token_env_var}=<your bot token>."
+        ),
+    )
+
+
+def _build_telegram_access_check(
+    *,
+    allowed_chat_ids: frozenset[int],
+) -> StartupCheck:
+    if allowed_chat_ids:
+        count = len(allowed_chat_ids)
+        label = "chat" if count == 1 else "chats"
+        return StartupCheck(
+            status=CheckStatus.OK,
+            label="Telegram access",
+            detail=f"{count} authorized Telegram {label} configured.",
+        )
+
+    return StartupCheck(
+        status=CheckStatus.WARN,
+        label="Telegram access",
+        detail=(
+            "Secure deny-by-default mode is active. "
+            "`allowed_chat_ids: []` means no Telegram chats are authorized yet."
+        ),
+        guidance=(
+            "Add one or more numeric chat ids to config/telegram.yaml. "
+            "Rejected chats are logged so you can authorize them later."
         ),
     )
 
