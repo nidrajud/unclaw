@@ -11,6 +11,7 @@ from unclaw.core.session_manager import SessionManager
 from unclaw.errors import UnclawError
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
+from unclaw.memory import MemoryManager
 from unclaw.schemas.chat import MessageRole
 from unclaw.settings import Settings
 
@@ -20,6 +21,7 @@ def main() -> int:
     try:
         settings = bootstrap()
         session_manager = SessionManager.from_settings(settings)
+        memory_manager = MemoryManager(session_manager=session_manager)
         current_session = session_manager.ensure_current_session()
         event_bus = EventBus()
         tracer = Tracer(
@@ -43,6 +45,7 @@ def main() -> int:
         return run_cli(
             session_manager=session_manager,
             command_handler=command_handler,
+            memory_manager=memory_manager,
             tracer=tracer,
         )
     finally:
@@ -53,6 +56,7 @@ def run_cli(
     *,
     session_manager: SessionManager,
     command_handler: CommandHandler,
+    memory_manager: MemoryManager,
     tracer: Tracer,
 ) -> int:
     """Run the interactive read-eval-print loop."""
@@ -73,8 +77,19 @@ def run_cli(
             continue
 
         if stripped_input.startswith("/"):
+            memory_command_result = _handle_memory_command(
+                raw_command=stripped_input,
+                memory_manager=memory_manager,
+            )
+            if memory_command_result is not None:
+                _render_command_result(memory_command_result)
+                continue
+
             result = command_handler.handle(stripped_input)
             _render_command_result(result)
+            if stripped_input == "/help" and result.status is CommandStatus.OK:
+                print("/session")
+                print("/summary")
             if result.should_exit:
                 return 0
             continue
@@ -92,6 +107,10 @@ def run_cli(
             tracer=tracer,
         )
         print(f"assistant> {assistant_reply}")
+        try:
+            memory_manager.build_or_refresh_session_summary(session.id)
+        except UnclawError as exc:
+            print(f"Warning: could not refresh session summary: {exc}")
 
 
 def _print_banner(
@@ -107,7 +126,7 @@ def _print_banner(
         f"Model: {command_handler.current_model_profile_name} | "
         f"Thinking: {command_handler.thinking_label}"
     )
-    print("Type /help for commands.")
+    print("Type /help for commands. Use /session or /summary for memory.")
 
 
 def _build_prompt(command_handler: CommandHandler) -> str:
@@ -131,6 +150,64 @@ def _render_command_result(result: CommandResult) -> None:
 
     for line in result.lines:
         print(line)
+
+
+def _handle_memory_command(
+    *,
+    raw_command: str,
+    memory_manager: MemoryManager,
+) -> CommandResult | None:
+    normalized = raw_command.strip()
+    parts = normalized[1:].split()
+    command = parts[0].lower()
+    arguments = parts[1:]
+
+    try:
+        if command == "summary":
+            if arguments:
+                return CommandResult(
+                    status=CommandStatus.ERROR,
+                    lines=("Usage: /summary",),
+                )
+
+            summary_text = memory_manager.get_session_summary()
+            return CommandResult(
+                status=CommandStatus.OK,
+                lines=("Session summary:", summary_text),
+            )
+
+        if command == "session":
+            if arguments:
+                return CommandResult(
+                    status=CommandStatus.ERROR,
+                    lines=("Usage: /session",),
+                )
+
+            state = memory_manager.get_session_state()
+            lines = [
+                f"Session: {state.session_id}",
+                f"Title: {state.title}",
+                f"Updated: {state.updated_at}",
+                (
+                    "Messages: "
+                    f"{state.message_count} total | "
+                    f"{state.user_message_count} user | "
+                    f"{state.assistant_message_count} assistant"
+                ),
+                f"Summary: {state.summary_text}",
+            ]
+            if state.recent_snippets:
+                lines.append("Recent snippets:")
+                lines.extend(state.recent_snippets)
+
+            return CommandResult(
+                status=CommandStatus.OK,
+                lines=tuple(lines),
+            )
+    except UnclawError as exc:
+        return CommandResult(status=CommandStatus.ERROR, lines=(str(exc),))
+
+    return None
 
 
 if __name__ == "__main__":

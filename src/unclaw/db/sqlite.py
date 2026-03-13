@@ -28,6 +28,7 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
             title TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
+            summary_text TEXT,
             is_active INTEGER NOT NULL CHECK (is_active IN (0, 1))
         );
 
@@ -61,4 +62,16 @@ def initialize_schema(connection: sqlite3.Connection) -> None:
         ON events (session_id, created_at DESC);
         """
     )
+    _ensure_session_summary_column(connection)
     connection.commit()
+
+
+def _ensure_session_summary_column(connection: sqlite3.Connection) -> None:
+    column_names = {
+        row["name"] if isinstance(row, sqlite3.Row) else row[1]
+        for row in connection.execute("PRAGMA table_info(sessions);").fetchall()
+    }
+    if "summary_text" in column_names:
+        return
+
+    connection.execute("ALTER TABLE sessions ADD COLUMN summary_text TEXT;")

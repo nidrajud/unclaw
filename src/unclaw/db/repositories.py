@@ -74,6 +74,19 @@ class SessionRepository:
             return None
         return _session_record_from_row(row)
 
+    def get_summary_text(self, session_id: str) -> str | None:
+        row = self.connection.execute(
+            """
+            SELECT summary_text
+            FROM sessions
+            WHERE id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return row["summary_text"]
+
     def update_session(
         self,
         session_id: str,
@@ -103,6 +116,26 @@ class SessionRepository:
 
         self.connection.commit()
         return self.get_session(session_id)
+
+    def update_summary_text(
+        self,
+        session_id: str,
+        summary_text: str | None,
+    ) -> str | None:
+        cursor = self.connection.execute(
+            """
+            UPDATE sessions
+            SET summary_text = ?
+            WHERE id = ?
+            """,
+            (_normalize_optional_text(summary_text), session_id),
+        )
+        if cursor.rowcount == 0:
+            self.connection.rollback()
+            return None
+
+        self.connection.commit()
+        return self.get_summary_text(session_id)
 
 
 @dataclass(slots=True)
@@ -303,6 +336,16 @@ def _require_text(value: str, *, field_name: str) -> str:
     if not value.strip():
         raise ValueError(f"{field_name} must be a non-empty string.")
     return value
+
+
+def _normalize_optional_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+
+    normalized = value.strip()
+    if not normalized:
+        return None
+    return normalized
 
 
 def _bool_to_db(value: bool) -> int:
