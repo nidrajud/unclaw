@@ -24,10 +24,15 @@ class ToolDispatcher:
 
         try:
             result = registered_tool.handler(call)
-        except Exception as exc:  # pragma: no cover - defensive path
+        except (ValueError, OSError) as exc:
             return ToolResult.failure(
                 tool_name=call.tool_name,
                 error=f"Tool '{call.tool_name}' failed: {exc}",
+            )
+        except Exception as exc:  # Defensive boundary for unexpected tool crashes.
+            return ToolResult.failure(
+                tool_name=call.tool_name,
+                error=f"Tool '{call.tool_name}' failed unexpectedly: {exc}",
             )
 
         if not isinstance(result, ToolResult):
