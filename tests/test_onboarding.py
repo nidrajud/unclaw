@@ -80,6 +80,7 @@ def test_recommended_onboarding_writes_terminal_and_telegram_preset(
     assert any("Ollama is not installed yet." in line for line in outputs)
     assert any("stored locally" in line for line in outputs)
     assert any("unclaw telegram" in line for line in outputs)
+    assert any("allow-latest" in line for line in outputs)
     assert stat.S_IMODE((project_root / "config" / "secrets.yaml").stat().st_mode) == 0o600
 
 
@@ -339,6 +340,14 @@ def _create_temp_project(tmp_path: Path) -> Path:
     source_root = Path(__file__).resolve().parents[1]
     project_root = tmp_path / "project"
     shutil.copytree(source_root / "config", project_root / "config")
+    telegram_config_path = project_root / "config" / "telegram.yaml"
+    telegram_payload = yaml.safe_load(telegram_config_path.read_text(encoding="utf-8"))
+    assert isinstance(telegram_payload, dict)
+    telegram_payload["allowed_chat_ids"] = []
+    telegram_config_path.write_text(
+        yaml.safe_dump(telegram_payload, sort_keys=False),
+        encoding="utf-8",
+    )
     secrets_path = project_root / "config" / "secrets.yaml"
     if secrets_path.exists():
         secrets_path.unlink()

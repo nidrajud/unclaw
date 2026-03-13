@@ -106,6 +106,33 @@ def test_startup_report_accepts_local_telegram_token(monkeypatch, tmp_path: Path
     assert "local file" in token_check.detail
 
 
+def test_startup_report_suggests_local_telegram_allow_commands(monkeypatch) -> None:
+    settings = load_settings(project_root=_repo_root())
+
+    monkeypatch.setattr(
+        "unclaw.startup.inspect_ollama",
+        lambda timeout_seconds=1.5: OllamaStatus(
+            cli_path="/usr/bin/ollama",
+            is_installed=True,
+            is_running=False,
+            model_names=(),
+        ),
+    )
+
+    report = build_startup_report(
+        settings,
+        channel_name="telegram",
+        channel_enabled=True,
+        required_profile_names=(),
+        telegram_allowed_chat_ids=frozenset(),
+    )
+
+    access_check = next(check for check in report.checks if check.label == "Telegram access")
+    assert access_check.status is CheckStatus.WARN
+    assert access_check.guidance is not None
+    assert "allow-latest" in access_check.guidance
+
+
 def test_build_banner_centers_brand_tagline() -> None:
     banner = build_banner(
         title="Onboarding",

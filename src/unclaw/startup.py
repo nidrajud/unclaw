@@ -514,6 +514,7 @@ def _build_telegram_access_check(
             status=CheckStatus.OK,
             label="Telegram access",
             detail=f"{count} authorized Telegram {label} configured.",
+            guidance="Review them with `unclaw telegram list`.",
         )
 
     return StartupCheck(
@@ -524,8 +525,8 @@ def _build_telegram_access_check(
             "`allowed_chat_ids: []` means no Telegram chats are authorized yet."
         ),
         guidance=(
-            "Add one or more numeric chat ids to config/telegram.yaml. "
-            "Rejected chats are logged so you can authorize them later."
+            "Send one message to the bot, then run `unclaw telegram allow-latest` "
+            "or `unclaw telegram allow <chat_id>` on this machine."
         ),
     )
 

@@ -38,13 +38,33 @@ LIST_DIRECTORY_DEFINITION = ToolDefinition(
 )
 
 
-def register_file_tools(registry: ToolRegistry) -> None:
+def register_file_tools(
+    registry: ToolRegistry,
+    *,
+    project_root: Path | None = None,
+    configured_roots: tuple[str, ...] = (),
+) -> None:
     """Register the built-in local file tools."""
-    registry.register(READ_TEXT_FILE_DEFINITION, read_text_file)
-    registry.register(LIST_DIRECTORY_DEFINITION, list_directory)
+    allowed_roots = resolve_allowed_roots(
+        project_root=project_root,
+        configured_roots=configured_roots,
+    )
+
+    def read_handler(call: ToolCall) -> ToolResult:
+        return read_text_file(call, allowed_roots=allowed_roots)
+
+    def list_handler(call: ToolCall) -> ToolResult:
+        return list_directory(call, allowed_roots=allowed_roots)
+
+    registry.register(READ_TEXT_FILE_DEFINITION, read_handler)
+    registry.register(LIST_DIRECTORY_DEFINITION, list_handler)
 
 
-def read_text_file(call: ToolCall) -> ToolResult:
+def read_text_file(
+    call: ToolCall,
+    *,
+    allowed_roots: tuple[Path, ...] | None = None,
+) -> ToolResult:
     """Read a local text file with a small, safe default output limit."""
     tool_name = READ_TEXT_FILE_DEFINITION.name
 
@@ -59,6 +79,13 @@ def read_text_file(call: ToolCall) -> ToolResult:
         return ToolResult.failure(tool_name=tool_name, error=str(exc))
 
     path = _resolve_path(path_value)
+    access_error = _restrict_to_allowed_roots(
+        tool_name=tool_name,
+        path=path,
+        allowed_roots=_normalize_allowed_roots(allowed_roots),
+    )
+    if access_error is not None:
+        return access_error
     if not path.exists():
         return ToolResult.failure(
             tool_name=tool_name,
@@ -102,7 +129,11 @@ def read_text_file(call: ToolCall) -> ToolResult:
     )
 
 
-def list_directory(call: ToolCall) -> ToolResult:
+def list_directory(
+    call: ToolCall,
+    *,
+    allowed_roots: tuple[Path, ...] | None = None,
+) -> ToolResult:
     """List one directory with a compact tree-like output."""
     tool_name = LIST_DIRECTORY_DEFINITION.name
 
@@ -124,6 +155,13 @@ def list_directory(call: ToolCall) -> ToolResult:
         )
 
     path = _resolve_path(path_value)
+    access_error = _restrict_to_allowed_roots(
+        tool_name=tool_name,
+        path=path,
+        allowed_roots=_normalize_allowed_roots(allowed_roots),
+    )
+    if access_error is not None:
+        return access_error
     if not path.exists():
         return ToolResult.failure(
             tool_name=tool_name,
@@ -226,6 +264,60 @@ def _is_directory(path: Path) -> bool:
 
 def _resolve_path(path_value: str) -> Path:
     return Path(path_value).expanduser().resolve()
+
+
+def resolve_allowed_roots(
+    *,
+    project_root: Path | None,
+    configured_roots: tuple[str, ...],
+) -> tuple[Path, ...]:
+    base_root = project_root.resolve() if project_root is not None else Path.cwd().resolve()
+    roots = [base_root]
+
+    for raw_root in configured_roots:
+        candidate = Path(raw_root).expanduser()
+        if not candidate.is_absolute():
+            candidate = base_root / candidate
+        roots.append(candidate.resolve())
+
+    return _normalize_allowed_roots(tuple(roots))
+
+
+def _normalize_allowed_roots(
+    allowed_roots: tuple[Path, ...] | None,
+) -> tuple[Path, ...]:
+    if not allowed_roots:
+        return (Path.cwd().resolve(),)
+    return tuple(dict.fromkeys(root.resolve() for root in allowed_roots))
+
+
+def _restrict_to_allowed_roots(
+    *,
+    tool_name: str,
+    path: Path,
+    allowed_roots: tuple[Path, ...],
+) -> ToolResult | None:
+    if _is_path_allowed(path, allowed_roots):
+        return None
+
+    allowed_roots_text = ", ".join(str(root) for root in allowed_roots)
+    return ToolResult.failure(
+        tool_name=tool_name,
+        error=(
+            f"Access to '{path}' is outside the allowed local roots. "
+            f"Allowed roots: {allowed_roots_text}."
+        ),
+    )
+
+
+def _is_path_allowed(path: Path, allowed_roots: tuple[Path, ...]) -> bool:
+    for root in allowed_roots:
+        try:
+            path.relative_to(root)
+        except ValueError:
+            continue
+        return True
+    return False
 
 
 def _read_string_argument(arguments: dict[str, Any], key: str) -> str:

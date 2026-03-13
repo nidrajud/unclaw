@@ -43,11 +43,11 @@ _TELEGRAM_API_BASE_URL = "https://api.telegram.org"
 _POLL_RETRY_DELAY_SECONDS = 3.0
 _MESSAGE_LIMIT = 4000
 _MAX_PENDING_MESSAGES_PER_CHAT = 2
-_UNAUTHORIZED_CHAT_MESSAGE = "This chat is not authorized for this Unclaw bot."
 _RATE_LIMITED_CHAT_MESSAGE = (
     "Too many messages arrived before the previous reply finished. "
     "Please wait for the next reply, then send another message."
 )
+_LATEST_REJECTED_EVENT_TYPE = "telegram.chat.rejected"
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +60,14 @@ class TelegramConfig:
 
     def is_chat_allowed(self, chat_id: int) -> bool:
         return chat_id in self.allowed_chat_ids
+
+
+@dataclass(frozen=True, slots=True)
+class TelegramAuthorizationUpdate:
+    chat_id: int
+    allowed_chat_ids: tuple[int, ...]
+    file_changed: bool
+    was_authorized: bool
 
 
 class TelegramApiError(UnclawError):
@@ -311,7 +319,7 @@ class TelegramBotChannel:
             LOGGER.warning("Rejected Telegram message from unauthorized chat=%s", chat_id)
             self._send_reply(
                 chat_id=chat_id,
-                text=_UNAUTHORIZED_CHAT_MESSAGE,
+                text=_build_unauthorized_chat_message(chat_id),
             )
             return
 
@@ -545,13 +553,101 @@ def load_telegram_config(settings: Settings) -> TelegramConfig:
     )
 
 
-def main(project_root: Path | None = None) -> int:
+def allow_telegram_chat(settings: Settings, chat_id: int) -> TelegramAuthorizationUpdate:
+    config = load_telegram_config(settings)
+    updated_chat_ids = tuple(sorted({*config.allowed_chat_ids, chat_id}))
+    file_changed = _write_allowed_chat_ids(
+        settings,
+        allowed_chat_ids=list(updated_chat_ids),
+    )
+    return TelegramAuthorizationUpdate(
+        chat_id=chat_id,
+        allowed_chat_ids=updated_chat_ids,
+        file_changed=file_changed,
+        was_authorized=config.is_chat_allowed(chat_id),
+    )
+
+
+def revoke_telegram_chat(
+    settings: Settings,
+    chat_id: int,
+) -> TelegramAuthorizationUpdate:
+    config = load_telegram_config(settings)
+    updated_chat_ids = tuple(
+        chat for chat in sorted(config.allowed_chat_ids) if chat != chat_id
+    )
+    file_changed = _write_allowed_chat_ids(
+        settings,
+        allowed_chat_ids=list(updated_chat_ids),
+    )
+    return TelegramAuthorizationUpdate(
+        chat_id=chat_id,
+        allowed_chat_ids=updated_chat_ids,
+        file_changed=file_changed,
+        was_authorized=config.is_chat_allowed(chat_id),
+    )
+
+
+def find_latest_rejected_chat_id(settings: Settings) -> int | None:
+    database_path = settings.paths.database_path
+    if not database_path.exists():
+        return None
+
+    connection = sqlite3.connect(database_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        rows = connection.execute(
+            """
+            SELECT payload_json
+            FROM events
+            WHERE event_type = ?
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT 20
+            """,
+            (_LATEST_REJECTED_EVENT_TYPE,),
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        connection.close()
+
+    for row in rows:
+        payload_json = row["payload_json"]
+        if not isinstance(payload_json, str) or not payload_json.strip():
+            continue
+        try:
+            payload = json.loads(payload_json)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+
+        chat_id = payload.get("chat_id")
+        reason = payload.get("reason")
+        if isinstance(chat_id, int) and reason == "unauthorized":
+            return chat_id
+    return None
+
+
+def main(
+    project_root: Path | None = None,
+    *,
+    command: str = "start",
+    chat_id: int | None = None,
+) -> int:
     """Run the Telegram polling channel."""
 
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+    if command != "start":
+        return _run_management_command(
+            project_root=project_root,
+            command=command,
+            chat_id=chat_id,
+        )
 
     session_manager: SessionManager | None = None
     try:
@@ -590,6 +686,11 @@ def main(project_root: Path | None = None) -> int:
             )
         )
         print(format_startup_report(startup_report))
+        if not telegram_config.allowed_chat_ids:
+            print(
+                "Tip: when your own Telegram chat is rejected, run "
+                "`unclaw telegram allow-latest` on this machine."
+            )
         if startup_report.has_errors:
             return 1
 
@@ -623,7 +724,7 @@ def main(project_root: Path | None = None) -> int:
             model_name=settings.default_model.model_name,
             reason="startup",
         )
-        tool_executor = ToolExecutor.with_default_tools()
+        tool_executor = ToolExecutor.with_default_tools(settings)
         api_client = TelegramApiClient(bot_token=resolved_bot_token.value)
         session_store = TelegramChatSessionStore(session_manager.connection)
         session_store.initialize()
@@ -651,6 +752,85 @@ def main(project_root: Path | None = None) -> int:
             session_manager.close()
 
 
+def _run_management_command(
+    *,
+    project_root: Path | None,
+    command: str,
+    chat_id: int | None,
+) -> int:
+    try:
+        settings = bootstrap(project_root=project_root)
+        match command:
+            case "allow":
+                if chat_id is None:
+                    raise ConfigurationError(
+                        "Telegram allow requires one numeric chat id."
+                    )
+                update = allow_telegram_chat(settings, chat_id)
+                if update.was_authorized and not update.file_changed:
+                    print(f"Telegram chat {chat_id} is already authorized.")
+                elif update.was_authorized:
+                    print(
+                        "Telegram access list was normalized without adding a new "
+                        f"chat. Chat {chat_id} remains authorized."
+                    )
+                else:
+                    print(
+                        f"Authorized Telegram chat {chat_id}. "
+                        f"{_format_authorized_chat_count(update.allowed_chat_ids)}"
+                    )
+                return 0
+            case "allow-latest":
+                latest_chat_id = find_latest_rejected_chat_id(settings)
+                if latest_chat_id is None:
+                    print(
+                        "No rejected Telegram chat is stored locally yet. "
+                        "Send one message to the bot first, then rerun "
+                        "`unclaw telegram allow-latest`."
+                    )
+                    return 1
+                update = allow_telegram_chat(settings, latest_chat_id)
+                if update.was_authorized and not update.file_changed:
+                    print(
+                        f"The latest rejected Telegram chat ({latest_chat_id}) is "
+                        "already authorized."
+                    )
+                else:
+                    print(
+                        f"Authorized the latest rejected Telegram chat: {latest_chat_id}. "
+                        f"{_format_authorized_chat_count(update.allowed_chat_ids)}"
+                    )
+                return 0
+            case "revoke":
+                if chat_id is None:
+                    raise ConfigurationError(
+                        "Telegram revoke requires one numeric chat id."
+                    )
+                update = revoke_telegram_chat(settings, chat_id)
+                if update.was_authorized:
+                    print(
+                        f"Revoked Telegram chat {chat_id}. "
+                        f"{_format_authorized_chat_count(update.allowed_chat_ids)}"
+                    )
+                else:
+                    print(f"Telegram chat {chat_id} was not authorized.")
+                return 0
+            case "list":
+                config = load_telegram_config(settings)
+                _print_authorized_chat_list(
+                    config.allowed_chat_ids,
+                    latest_rejected_chat_id=find_latest_rejected_chat_id(settings),
+                )
+                return 0
+            case _:
+                raise ConfigurationError(
+                    f"Unsupported Telegram command '{command}'."
+                )
+    except UnclawError as exc:
+        print(f"Failed to manage Unclaw Telegram access: {exc}", file=sys.stderr)
+        return 1
+
+
 def _load_yaml_mapping(path: Path) -> dict[str, Any]:
     try:
         payload = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -668,6 +848,28 @@ def _load_yaml_mapping(path: Path) -> dict[str, Any]:
             f"Telegram configuration must contain a mapping: {path}"
         )
     return payload
+
+
+def _write_allowed_chat_ids(
+    settings: Settings,
+    *,
+    allowed_chat_ids: list[int],
+) -> bool:
+    config_path = settings.paths.config_dir / _TELEGRAM_CONFIG_FILE_NAME
+    payload = _load_yaml_mapping(config_path)
+    if payload.get("allowed_chat_ids") == allowed_chat_ids:
+        return False
+
+    payload["allowed_chat_ids"] = allowed_chat_ids
+    rendered = yaml.safe_dump(
+        payload,
+        sort_keys=False,
+        allow_unicode=False,
+    )
+    temp_path = config_path.with_name(f"{config_path.name}.tmp")
+    temp_path.write_text(rendered, encoding="utf-8")
+    temp_path.replace(config_path)
+    return True
 
 
 def _read_bool(
@@ -820,6 +1022,48 @@ def _format_telegram_access_mode(config: TelegramConfig) -> str:
     if authorized_count == 1:
         return "allowlist (1 chat)"
     return f"allowlist ({authorized_count} chats)"
+
+
+def _print_authorized_chat_list(
+    allowed_chat_ids: frozenset[int],
+    *,
+    latest_rejected_chat_id: int | None,
+) -> None:
+    if not allowed_chat_ids:
+        print("No Telegram chats are authorized. Deny-by-default is active.")
+    else:
+        print("Authorized Telegram chats:")
+        for chat_id in sorted(allowed_chat_ids):
+            print(f"- {chat_id}")
+
+    if latest_rejected_chat_id is not None:
+        print(f"Latest rejected chat: {latest_rejected_chat_id}")
+        print(
+            "Authorize it with `unclaw telegram allow-latest` "
+            f"or `unclaw telegram allow {latest_rejected_chat_id}`."
+        )
+    else:
+        print(
+            "Tip: send one message to your bot, then use "
+            "`unclaw telegram allow-latest` on this machine."
+        )
+
+
+def _format_authorized_chat_count(allowed_chat_ids: tuple[int, ...]) -> str:
+    count = len(allowed_chat_ids)
+    label = "chat is" if count == 1 else "chats are"
+    return f"{count} authorized Telegram {label} now configured."
+
+
+def _build_unauthorized_chat_message(chat_id: int) -> str:
+    return (
+        "This chat is not authorized yet for this Unclaw bot.\n\n"
+        "On the server machine, run:\n"
+        f"unclaw telegram allow {chat_id}\n"
+        "or:\n"
+        "unclaw telegram allow-latest\n\n"
+        "Then send your message again."
+    )
 
 
 def _read_http_error_body(exc: HTTPError) -> str:

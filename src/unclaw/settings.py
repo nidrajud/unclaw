@@ -60,6 +60,27 @@ class ThinkingSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class FileToolSecuritySettings:
+    allowed_roots: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class FetchToolSecuritySettings:
+    allow_private_networks: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ToolSecuritySettings:
+    files: FileToolSecuritySettings
+    fetch: FetchToolSecuritySettings
+
+
+@dataclass(frozen=True, slots=True)
+class SecuritySettings:
+    tools: ToolSecuritySettings
+
+
+@dataclass(frozen=True, slots=True)
 class AppSettings:
     name: str
     display_name: str
@@ -69,6 +90,7 @@ class AppSettings:
     channels: ChannelSettings
     default_model_profile: str
     thinking: ThinkingSettings
+    security: SecuritySettings
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,7 +154,10 @@ def load_settings(project_root: Path | None = None) -> Settings:
     app_payload = _load_yaml_file(app_config_path)
     models_payload = _load_yaml_file(models_config_path)
 
-    app_settings = _build_app_settings(app_payload)
+    app_settings = _build_app_settings(
+        app_payload,
+        project_root=resolved_project_root,
+    )
     model_profiles = _build_model_profiles(models_payload)
     runtime_paths = _build_runtime_paths(
         project_root=resolved_project_root,
@@ -196,13 +221,22 @@ def _load_yaml_file(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _build_app_settings(payload: Mapping[str, Any]) -> AppSettings:
+def _build_app_settings(
+    payload: Mapping[str, Any],
+    *,
+    project_root: Path,
+) -> AppSettings:
+    del project_root
     app_section = _get_mapping(payload, "app")
     paths_section = _get_mapping(payload, "paths")
     logging_section = _get_mapping(payload, "logging")
     channels_section = _get_mapping(payload, "channels")
     models_section = _get_mapping(payload, "models")
     thinking_section = _get_mapping(payload, "thinking")
+    security_section = _get_mapping(payload, "security")
+    tool_security_section = _get_mapping(security_section, "tools")
+    file_security_section = _get_mapping(tool_security_section, "files")
+    fetch_security_section = _get_mapping(tool_security_section, "fetch")
 
     directories = DirectorySettings(
         data_dir=_get_str(paths_section, "data_dir", DATA_DIRECTORY_NAME),
@@ -231,6 +265,24 @@ def _build_app_settings(payload: Mapping[str, Any]) -> AppSettings:
     thinking_settings = ThinkingSettings(
         default_enabled=_get_bool(thinking_section, "default_enabled", False),
     )
+    security_settings = SecuritySettings(
+        tools=ToolSecuritySettings(
+            files=FileToolSecuritySettings(
+                allowed_roots=_get_str_list(
+                    file_security_section,
+                    "allowed_roots",
+                    default=(".",),
+                ),
+            ),
+            fetch=FetchToolSecuritySettings(
+                allow_private_networks=_get_bool(
+                    fetch_security_section,
+                    "allow_private_networks",
+                    False,
+                )
+            ),
+        )
+    )
 
     return AppSettings(
         name=_get_str(app_section, "name", APP_NAME),
@@ -241,6 +293,7 @@ def _build_app_settings(payload: Mapping[str, Any]) -> AppSettings:
         channels=channel_settings,
         default_model_profile=_get_str(models_section, "default_profile"),
         thinking=thinking_settings,
+        security=security_settings,
     )
 
 
@@ -359,3 +412,25 @@ def _get_choice(
             f"Configuration key '{key}' must be one of: {allowed}."
         )
     return normalized_value
+
+
+def _get_str_list(
+    source: Mapping[str, Any],
+    key: str,
+    *,
+    default: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    value = source.get(key)
+    if value is None:
+        return default
+    if not isinstance(value, list):
+        raise ConfigurationError(f"Configuration key '{key}' must be a list.")
+
+    values: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ConfigurationError(
+                f"Configuration key '{key}' must contain non-empty strings."
+            )
+        values.append(item.strip())
+    return tuple(values)

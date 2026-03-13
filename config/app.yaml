@@ -23,3 +23,10 @@ models:
   default_profile: main
 thinking:
   default_enabled: false
+security:
+  tools:
+    files:
+      allowed_roots:
+      - .
+    fetch:
+      allow_private_networks: false

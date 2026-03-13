@@ -781,14 +781,14 @@ def run_onboarding(
             count = len(plan.telegram_allowed_chat_ids)
             label = "chat" if count == 1 else "chats"
             output_func(
-                f"- Telegram access: {count} authorized {label} already configured in `config/telegram.yaml`."
+                f"- Telegram access: {count} authorized {label} already configured. Review them with `unclaw telegram list`."
             )
         else:
             output_func(
-                "- Telegram access: secure deny-by-default until you add chat IDs to `config/telegram.yaml`."
+                "- Telegram access: secure deny-by-default until you authorize a chat locally."
             )
             output_func(
-                "- Tip: send one test message, then check `unclaw logs simple` for the rejected `chat_id` to allowlist."
+                "- Tip: send one test message, then run `unclaw telegram allow-latest` on this machine."
             )
         output_func(
             f"- Advanced fallback: export {plan.telegram_bot_token_env_var}=<your bot token>"
@@ -860,6 +860,20 @@ def build_onboarding_file_payloads(
         },
         "thinking": {
             "default_enabled": settings.app.thinking.default_enabled,
+        },
+        "security": {
+            "tools": {
+                "files": {
+                    "allowed_roots": list(
+                        settings.app.security.tools.files.allowed_roots
+                    ),
+                },
+                "fetch": {
+                    "allow_private_networks": (
+                        settings.app.security.tools.fetch.allow_private_networks
+                    ),
+                },
+            },
         },
     }
 

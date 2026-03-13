@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
+from unclaw.settings import Settings
 from unclaw.tools.contracts import ToolCall, ToolDefinition, ToolResult
 from unclaw.tools.dispatcher import ToolDispatcher
 from unclaw.tools.file_tools import (
@@ -31,9 +32,22 @@ def register_default_tools(registry: ToolRegistry) -> ToolRegistry:
     return registry
 
 
-def create_default_tool_registry() -> ToolRegistry:
+def create_default_tool_registry(settings: Settings | None = None) -> ToolRegistry:
     """Create a registry populated with the initial built-in tools."""
-    return register_default_tools(ToolRegistry())
+    registry = ToolRegistry()
+    if settings is None:
+        return register_default_tools(registry)
+
+    register_file_tools(
+        registry,
+        project_root=settings.paths.project_root,
+        configured_roots=settings.app.security.tools.files.allowed_roots,
+    )
+    register_web_tools(
+        registry,
+        allow_private_networks=settings.app.security.tools.fetch.allow_private_networks,
+    )
+    return registry
 
 
 def resolve_builtin_tool_command(command_name: str) -> str | None:
@@ -52,8 +66,8 @@ class ToolExecutor:
         self.dispatcher = ToolDispatcher(self.registry)
 
     @classmethod
-    def with_default_tools(cls) -> ToolExecutor:
-        return cls(registry=create_default_tool_registry())
+    def with_default_tools(cls, settings: Settings | None = None) -> ToolExecutor:
+        return cls(registry=create_default_tool_registry(settings))
 
     def list_tools(self) -> list[ToolDefinition]:
         return self.registry.list_tools()
@@ -66,9 +80,12 @@ def execute_tool_call(
     call: ToolCall,
     *,
     registry: ToolRegistry | None = None,
+    settings: Settings | None = None,
 ) -> ToolResult:
     """Execute one tool call using the provided or default registry."""
-    active_registry = registry if registry is not None else create_default_tool_registry()
+    active_registry = (
+        registry if registry is not None else create_default_tool_registry(settings)
+    )
     dispatcher = ToolDispatcher(active_registry)
     return dispatcher.dispatch(call)
 

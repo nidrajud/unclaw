@@ -19,16 +19,55 @@ def test_main_defaults_to_start(monkeypatch) -> None:
 
 
 def test_main_dispatches_telegram_with_project_root(monkeypatch, tmp_path: Path) -> None:
-    captured: dict[str, Path | None] = {}
+    captured: dict[str, Path | str | int | None] = {}
 
-    def fake_telegram(*, project_root: Path | None = None) -> int:
+    def fake_telegram(
+        *,
+        project_root: Path | None = None,
+        command: str = "start",
+        chat_id: int | None = None,
+    ) -> int:
         captured["project_root"] = project_root
+        captured["command"] = command
+        captured["chat_id"] = chat_id
         return 22
 
     monkeypatch.setattr(unclaw_main.telegram_bot, "main", fake_telegram)
 
     assert unclaw_main.main(["--project-root", str(tmp_path), "telegram"]) == 22
     assert captured["project_root"] == tmp_path
+    assert captured["command"] == "start"
+    assert captured["chat_id"] is None
+
+
+def test_main_dispatches_telegram_management_command(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Path | str | int | None] = {}
+
+    def fake_telegram(
+        *,
+        project_root: Path | None = None,
+        command: str = "start",
+        chat_id: int | None = None,
+    ) -> int:
+        captured["project_root"] = project_root
+        captured["command"] = command
+        captured["chat_id"] = chat_id
+        return 23
+
+    monkeypatch.setattr(unclaw_main.telegram_bot, "main", fake_telegram)
+
+    assert (
+        unclaw_main.main(
+            ["--project-root", str(tmp_path), "telegram", "allow", "123456789"]
+        )
+        == 23
+    )
+    assert captured["project_root"] == tmp_path
+    assert captured["command"] == "allow"
+    assert captured["chat_id"] == 123456789
 
 
 def test_main_dispatches_onboarding(monkeypatch, tmp_path: Path) -> None:
@@ -47,6 +86,14 @@ def test_main_dispatches_onboarding(monkeypatch, tmp_path: Path) -> None:
 def test_main_help_alias_prints_parser_help(capsys) -> None:
     assert unclaw_main.main(["help"]) == 0
     assert capsys.readouterr().out == unclaw_main.build_parser().format_help()
+
+
+def test_main_help_mentions_telegram_management_commands(capsys) -> None:
+    unclaw_main.main(["help"])
+    help_text = capsys.readouterr().out
+
+    assert "unclaw telegram allow-latest" in help_text
+    assert "unclaw telegram list" in help_text
 
 
 def test_main_dispatches_logs_with_default_simple(

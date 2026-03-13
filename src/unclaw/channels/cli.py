@@ -93,7 +93,7 @@ def main(project_root: Path | None = None) -> int:
         tracer.runtime_log_path = (
             settings.paths.log_file_path if settings.app.logging.file_enabled else None
         )
-        tool_executor = ToolExecutor.with_default_tools()
+        tool_executor = ToolExecutor.with_default_tools(settings)
         command_handler = CommandHandler(
             settings=settings,
             session_manager=session_manager,

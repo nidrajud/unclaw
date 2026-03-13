@@ -27,12 +27,12 @@ def test_help_lists_enriched_commands_for_cli() -> None:
     assert "/think on              Turn thinking mode on." in result.lines
     assert "/think off             Turn thinking mode off." in result.lines
     assert "/tools            List built-in tools." in result.lines
-    assert "/read <path>      Read one local file." in result.lines
+    assert "/read <path>      Read one local file inside allowed roots." in result.lines
     assert (
-        "/ls [path]        List one local directory. Defaults to the current directory."
+        "/ls [path]        List one local directory inside allowed roots. Defaults to the current directory."
         in result.lines
     )
-    assert "/fetch <url>      Fetch one URL." in result.lines
+    assert "/fetch <url>      Fetch one public URL." in result.lines
     assert "/session  Show the current session state." in result.lines
     assert "/summary  Show the saved session summary." in result.lines
     assert "/help  Show this command list with examples." in result.lines

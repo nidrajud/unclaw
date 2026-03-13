@@ -25,7 +25,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if command_name == "start":
         return cli_channel.main(project_root=project_root)
     if command_name == "telegram":
-        return telegram_bot.main(project_root=project_root)
+        return telegram_bot.main(
+            project_root=project_root,
+            command=args.telegram_command or "start",
+            chat_id=getattr(args, "chat_id", None),
+        )
     if command_name == "onboard":
         return onboarding_main(project_root=project_root)
     if command_name == "help":
@@ -55,6 +59,9 @@ def build_parser() -> argparse.ArgumentParser:
             "  unclaw logs full\n"
             "  unclaw onboard\n"
             "  unclaw telegram\n"
+            "  unclaw telegram allow-latest\n"
+            "  unclaw telegram allow 123456789\n"
+            "  unclaw telegram list\n"
             "  unclaw update"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -73,7 +80,48 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command")
     subparsers.add_parser("start", help="Start the terminal experience.")
-    subparsers.add_parser("telegram", help="Start the Telegram bot channel.")
+    telegram_parser = subparsers.add_parser(
+        "telegram",
+        help="Start the Telegram bot or manage Telegram chat access.",
+        description=(
+            "Start the Telegram bot channel or manage the local Telegram chat "
+            "allowlist."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  unclaw telegram\n"
+            "  unclaw telegram start\n"
+            "  unclaw telegram list\n"
+            "  unclaw telegram allow 123456789\n"
+            "  unclaw telegram allow-latest\n"
+            "  unclaw telegram revoke 123456789"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    telegram_parser.set_defaults(telegram_command="start")
+    telegram_subparsers = telegram_parser.add_subparsers(dest="telegram_command")
+    telegram_subparsers.add_parser(
+        "start",
+        help="Start the Telegram bot channel.",
+    )
+    telegram_subparsers.add_parser(
+        "list",
+        help="List authorized Telegram chats and the latest rejected chat.",
+    )
+    allow_parser = telegram_subparsers.add_parser(
+        "allow",
+        help="Authorize one Telegram chat id locally.",
+    )
+    allow_parser.add_argument("chat_id", type=int, help="Numeric Telegram chat id.")
+    telegram_subparsers.add_parser(
+        "allow-latest",
+        help="Authorize the most recently rejected Telegram chat id.",
+    )
+    revoke_parser = telegram_subparsers.add_parser(
+        "revoke",
+        help="Remove one Telegram chat id from the local allowlist.",
+    )
+    revoke_parser.add_argument("chat_id", type=int, help="Numeric Telegram chat id.")
     subparsers.add_parser("onboard", help="Run the guided local setup flow.")
     subparsers.add_parser("help", help="Show the same help as `unclaw --help`.")
     logs_parser = subparsers.add_parser(
