@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from unclaw.core.command_handler import CommandHandler
-from unclaw.core.orchestrator import Orchestrator
+from unclaw.core.orchestrator import Orchestrator, OrchestratorError
 from unclaw.core.router import route_request
-from unclaw.core.session_manager import SessionManager
+from unclaw.core.session_manager import SessionManager, SessionManagerError
+from unclaw.errors import ConfigurationError
+from unclaw.llm.base import LLMError
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
 from unclaw.schemas.chat import MessageRole
@@ -65,7 +67,12 @@ def run_user_turn(
             model_profile_name=route.model_profile_name,
         )
         assistant_reply = response.content.strip() or _EMPTY_RESPONSE_REPLY
-    except Exception as exc:
+    except (
+        ConfigurationError,
+        LLMError,
+        OrchestratorError,
+        SessionManagerError,
+    ) as exc:
         active_tracer.trace_model_failed(
             session_id=session.id,
             provider=_resolve_provider_name(
