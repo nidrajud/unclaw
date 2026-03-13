@@ -61,3 +61,6 @@ data/files/
 tmp/
 temp/
 *.tmp
+
+# Docs FR
+docs/tree_structure_FR.txt
