@@ -1,0 +1,24 @@
+app:
+  name: unclaw
+  display_name: Unclaw
+  environment: development
+
+paths:
+  data_dir: data
+  logs_dir: logs
+  sessions_dir: sessions
+  cache_dir: cache
+  files_dir: files
+  database_file: app.db
+
+logging:
+  level: INFO
+  console_enabled: true
+  file_enabled: true
+  file_name: runtime.log
+
+models:
+  default_profile: main
+
+thinking:
+  default_enabled: false

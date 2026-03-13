@@ -1,0 +1,18 @@
+"""Project-wide constants."""
+
+APP_NAME = "unclaw"
+DISPLAY_NAME = "Unclaw"
+
+CONFIG_DIRECTORY_NAME = "config"
+DATA_DIRECTORY_NAME = "data"
+LOGS_DIRECTORY_NAME = "logs"
+SESSIONS_DIRECTORY_NAME = "sessions"
+CACHE_DIRECTORY_NAME = "cache"
+FILES_DIRECTORY_NAME = "files"
+
+APP_CONFIG_FILE_NAME = "app.yaml"
+MODELS_CONFIG_FILE_NAME = "models.yaml"
+DATABASE_FILE_NAME = "app.db"
+LOG_FILE_NAME = "runtime.log"
+
+PROJECT_ROOT_ENV_VAR = "UNCLAW_PROJECT_ROOT"
