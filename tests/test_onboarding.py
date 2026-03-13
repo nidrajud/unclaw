@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
 
+import unclaw.onboarding as onboarding
 from unclaw.channels.telegram_bot import load_telegram_config
 from unclaw.errors import ConfigurationError
 from unclaw.onboarding import (
@@ -67,6 +69,9 @@ def test_recommended_onboarding_writes_terminal_and_telegram_preset(
     assert models_payload["profiles"]["codex"]["model_name"] == "qwen2.5-coder:7b"
     assert telegram_payload["bot_token_env_var"] == "TELEGRAM_BOT_TOKEN"
     assert secrets_payload["telegram"]["bot_token"] == EXAMPLE_TELEGRAM_TOKEN
+    assert any("BotFather" in line for line in outputs)
+    assert any("config/secrets.yaml" in line for line in outputs)
+    assert any("visible while you type" in line for line in outputs)
     assert any("Ollama is not installed yet." in line for line in outputs)
     assert any("stored locally" in line for line in outputs)
     assert any("unclaw telegram" in line for line in outputs)
@@ -127,28 +132,28 @@ def test_advanced_onboarding_can_choose_installed_and_custom_models(
     assert models_payload["profiles"]["codex"]["model_name"] == "devstral:latest"
 
 
-def test_interactive_select_uses_value_for_questionary_default(monkeypatch) -> None:
+def test_interactive_select_uses_value_for_initial_choice(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
     class FakeChoice:
-        def __init__(self, *, title: str, value: str) -> None:
+        def __init__(
+            self,
+            *,
+            title: str,
+            value: str,
+            description: str | None = None,
+        ) -> None:
             self.title = title
             self.value = value
+            self.description = description
 
-    class FakePrompt:
-        def ask(self) -> str:
-            return "advanced"
+    def fake_ask_select_question(prompt: str, **kwargs: object) -> str:
+        captured["prompt"] = prompt
+        captured.update(kwargs)
+        return "advanced"
 
-    class FakeQuestionary:
-        Choice = FakeChoice
-
-        @staticmethod
-        def select(prompt: str, **kwargs: object) -> FakePrompt:
-            captured["prompt"] = prompt
-            captured.update(kwargs)
-            return FakePrompt()
-
-    monkeypatch.setattr("unclaw.onboarding.questionary", FakeQuestionary)
+    monkeypatch.setattr(onboarding, "questionary", SimpleNamespace(Choice=FakeChoice))
+    monkeypatch.setattr(onboarding, "_ask_select_question", fake_ask_select_question)
 
     result = InteractivePromptUI(output_func=lambda _message: None).select(
         "How do you want to configure Unclaw?",
@@ -168,8 +173,53 @@ def test_interactive_select_uses_value_for_questionary_default(monkeypatch) -> N
     )
 
     assert result == "advanced"
-    assert captured["default"] == "advanced"
-    assert captured["style"] is not None
+    assert captured["initial_choice"] == "advanced"
+    choices = captured["choices"]
+    assert isinstance(choices, list)
+    assert choices[0].description == "Guided defaults."
+
+
+def test_onboarding_can_keep_existing_local_telegram_token(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    (project_root / "config" / "secrets.yaml").write_text(
+        yaml.safe_dump(
+            {"telegram": {"bot_token": EXAMPLE_TELEGRAM_TOKEN}},
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "unclaw.onboarding.inspect_ollama",
+        lambda timeout_seconds=1.5: OllamaStatus(
+            cli_path=None,
+            is_installed=False,
+            is_running=False,
+            model_names=(),
+            error_message="not installed",
+        ),
+    )
+
+    responses = iter(["", "", "2", "", ""])
+    prompts: list[str] = []
+
+    result = run_onboarding(
+        settings,
+        input_func=lambda prompt: prompts.append(prompt) or next(responses),
+        output_func=lambda _message: None,
+    )
+
+    secrets_payload = _read_yaml(project_root / "config" / "secrets.yaml")
+
+    assert result == 0
+    assert secrets_payload["telegram"]["bot_token"] == EXAMPLE_TELEGRAM_TOKEN
+    assert any(
+        "Keep the Telegram bot token already stored" in prompt for prompt in prompts
+    )
 
 
 def test_channel_preset_writes_telegram_only_to_app_config(
@@ -266,6 +316,9 @@ def _create_temp_project(tmp_path: Path) -> Path:
     source_root = Path(__file__).resolve().parents[1]
     project_root = tmp_path / "project"
     shutil.copytree(source_root / "config", project_root / "config")
+    secrets_path = project_root / "config" / "secrets.yaml"
+    if secrets_path.exists():
+        secrets_path.unlink()
     return project_root
 
 

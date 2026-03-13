@@ -44,6 +44,47 @@ def test_main_dispatches_onboarding(monkeypatch, tmp_path: Path) -> None:
     assert captured["project_root"] == tmp_path
 
 
+def test_main_help_alias_prints_parser_help(capsys) -> None:
+    assert unclaw_main.main(["help"]) == 0
+    assert capsys.readouterr().out == unclaw_main.build_parser().format_help()
+
+
+def test_main_dispatches_logs_with_default_simple(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Path | str | None] = {}
+
+    def fake_logs(*, project_root: Path | None = None, mode: str = "simple") -> int:
+        captured["project_root"] = project_root
+        captured["mode"] = mode
+        return 55
+
+    monkeypatch.setattr(unclaw_main.logs_cli, "main", fake_logs)
+
+    assert unclaw_main.main(["--project-root", str(tmp_path), "logs"]) == 55
+    assert captured["project_root"] == tmp_path
+    assert captured["mode"] == "simple"
+
+
+def test_main_dispatches_logs_with_explicit_full(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Path | str | None] = {}
+
+    def fake_logs(*, project_root: Path | None = None, mode: str = "simple") -> int:
+        captured["project_root"] = project_root
+        captured["mode"] = mode
+        return 66
+
+    monkeypatch.setattr(unclaw_main.logs_cli, "main", fake_logs)
+
+    assert unclaw_main.main(["--project-root", str(tmp_path), "logs", "full"]) == 66
+    assert captured["project_root"] == tmp_path
+    assert captured["mode"] == "full"
+
+
 def test_main_dispatches_update(monkeypatch, tmp_path: Path) -> None:
     captured: dict[str, Path | None] = {}
 

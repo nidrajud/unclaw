@@ -7,7 +7,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, TypeAlias
+from typing import Any, Protocol, TypeAlias
 
 import yaml
 
@@ -136,6 +136,7 @@ class PromptUI(Protocol):
         *,
         default: str,
         help_text: str | None = None,
+        instruction: str | None = None,
         validator: Callable[[str], str | None] | None = None,
     ) -> str:
         ...
@@ -151,9 +152,11 @@ class FallbackPromptUI:
 
     def section(self, title: str, description: str | None = None) -> None:
         self.output_func("")
-        self.output_func(f"[ {title} ]")
+        self.output_func(title)
+        self.output_func("-" * max(36, len(title)))
         if description:
             self.output_func(description)
+        self.output_func("")
 
     def info(self, message: str = "") -> None:
         self.output_func(message)
@@ -251,10 +254,13 @@ class FallbackPromptUI:
         *,
         default: str,
         help_text: str | None = None,
+        instruction: str | None = None,
         validator: Callable[[str], str | None] | None = None,
     ) -> str:
         if help_text:
             self.output_func(help_text)
+        if instruction:
+            self.output_func(instruction)
 
         prompt_suffix = f" [{default}]" if default.strip() else ""
         while True:
@@ -281,9 +287,11 @@ class InteractivePromptUI:
 
     def section(self, title: str, description: str | None = None) -> None:
         self.output_func("")
-        self.output_func(f"[ {title} ]")
+        self.output_func(title)
+        self.output_func("-" * max(36, len(title)))
         if description:
             self.output_func(description)
+        self.output_func("")
 
     def info(self, message: str = "") -> None:
         self.output_func(message)
@@ -318,19 +326,12 @@ class InteractivePromptUI:
             self.output_func(help_text)
 
         default_value = _resolve_select_default(options=options, default=default)
-        answer = questionary.select(
+        answer = _ask_select_question(
             prompt,
-            choices=[
-                questionary.Choice(
-                    title=_render_menu_title(option),
-                    value=option.value,
-                )
-                for option in options
-            ],
-            default=default_value,
+            choices=[_build_questionary_choice(option) for option in options],
+            initial_choice=default_value,
             instruction="Use arrow keys, then press Enter.",
-            style=_QUESTIONARY_STYLE,
-        ).ask()
+        )
         if answer is None:
             raise KeyboardInterrupt
         return answer
@@ -352,12 +353,17 @@ class InteractivePromptUI:
                 prompt,
                 choices=[
                     questionary.Choice(
-                        title=_render_menu_title(option),
+                        title=option.label,
                         value=option.value,
                         checked=option.value in default_lookup,
+                        description=option.description,
                     )
                     for option in options
                 ],
+                initial_choice=_resolve_checkbox_initial_choice(
+                    options=options,
+                    default_values=default_values,
+                ),
                 instruction="Use arrow keys to move, Space to toggle, Enter to confirm.",
                 style=_QUESTIONARY_STYLE,
             ).ask()
@@ -377,6 +383,7 @@ class InteractivePromptUI:
         *,
         default: str,
         help_text: str | None = None,
+        instruction: str | None = None,
         validator: Callable[[str], str | None] | None = None,
     ) -> str:
         while True:
@@ -385,7 +392,7 @@ class InteractivePromptUI:
             answer = questionary.text(
                 prompt,
                 default=default,
-                instruction="Press Enter to confirm.",
+                instruction=instruction or "Press Enter to confirm.",
                 style=_QUESTIONARY_STYLE,
             ).ask()
             if answer is None:
@@ -438,12 +445,12 @@ _SETUP_MODE_OPTIONS = (
     MenuOption(
         value="recommended",
         label="Recommended setup",
-        description="Use the recommended local models, then choose logging and channels.",
+        description="Start with the recommended local model set and guided defaults.",
     ),
     MenuOption(
         value="advanced",
         label="Advanced setup",
-        description="Choose logging, channels, and each model profile manually.",
+        description="Choose logging, channels, and every model profile manually.",
     ),
 )
 
@@ -451,51 +458,174 @@ _LOGGING_OPTIONS = (
     MenuOption(
         value="simple",
         label="Simple logs",
-        description="Cleaner startup output for everyday use.",
+        description="Cleaner day-to-day output with less terminal noise.",
     ),
     MenuOption(
         value="full",
         label="Full logs",
-        description="More runtime detail while you are testing or debugging.",
+        description="More runtime detail for testing, tuning, and debugging.",
     ),
 )
 
 _CHANNEL_PRESET_OPTIONS = (
     MenuOption(
         value="terminal_only",
-        label="terminal_only",
-        description="Enable terminal only (terminal_enabled: true, telegram_enabled: false).",
+        label="Terminal only",
+        description="Keep Unclaw in the terminal only.",
     ),
     MenuOption(
         value="terminal_and_telegram",
-        label="terminal_and_telegram",
-        description="Enable both channels (terminal_enabled: true, telegram_enabled: true).",
+        label="Terminal + Telegram",
+        description="Use both the terminal and your Telegram bot.",
     ),
     MenuOption(
         value="telegram_only",
-        label="telegram_only",
-        description="Enable Telegram only (terminal_enabled: false, telegram_enabled: true).",
+        label="Telegram only",
+        description="Run Unclaw only through Telegram.",
     ),
 )
 
 if questionary is not None:
     _QUESTIONARY_STYLE = questionary.Style(
         [
-            ("qmark", "fg:#f5b9a0 bold"),
-            ("question", "bold"),
-            ("answer", "fg:#f5b9a0 bold"),
-            ("pointer", "fg:#1d1411 bg:#f5b9a0 bold"),
-            ("highlighted", "fg:#1d1411 bg:#f5b9a0 bold"),
-            ("selected", "fg:#1d1411 bg:#f5b9a0 bold"),
-            ("text", "fg:#d7dde3"),
-            ("separator", "fg:#7a8792"),
-            ("instruction", "fg:#7a8792 italic"),
-            ("disabled", "fg:#58606a italic"),
+            ("qmark", "fg:#f6c7b1 bold"),
+            ("question", "fg:#fff4ec bold"),
+            ("answer", "fg:#f6c7b1 bold"),
+            ("pointer", "fg:#241511 bg:#f6c7b1 bold"),
+            ("highlighted", "fg:#241511 bg:#f6c7b1 bold"),
+            ("selected", "fg:#241511 bg:#f2b99b bold"),
+            ("text", "fg:#dde3e8"),
+            ("separator", "fg:#8f7b70"),
+            ("instruction", "fg:#c79a85 italic"),
+            ("disabled", "fg:#6d6159 italic"),
+            ("bottom-toolbar", "noreverse"),
             ("validation-toolbar", "fg:#ffffff bg:#b42318 bold"),
         ]
     )
 else:  # pragma: no cover - exercised when questionary is unavailable.
     _QUESTIONARY_STYLE = None
+
+
+def _build_questionary_choice(option: MenuOption) -> Any:
+    return questionary.Choice(
+        title=option.label,
+        value=option.value,
+        description=option.description,
+    )
+
+
+def _resolve_checkbox_initial_choice(
+    *,
+    options: tuple[MenuOption, ...],
+    default_values: tuple[str, ...],
+) -> str:
+    for value in default_values:
+        for option in options:
+            if option.value == value:
+                return value
+    return options[0].value
+
+
+def _ask_select_question(
+    prompt: str,
+    *,
+    choices: list[Any],
+    initial_choice: str,
+    instruction: str,
+) -> str | None:
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.keys import Keys
+    from questionary.constants import (
+        DEFAULT_QUESTION_PREFIX,
+        DEFAULT_SELECTED_POINTER,
+    )
+    from questionary.prompts import common as questionary_common
+    from questionary.prompts.common import InquirerControl
+    from questionary.question import Question
+    from questionary.styles import merge_styles_default
+
+    merged_style = merge_styles_default([_QUESTIONARY_STYLE])
+    inquirer_control = InquirerControl(
+        choices,
+        default=None,
+        pointer=DEFAULT_SELECTED_POINTER,
+        use_indicator=False,
+        use_shortcuts=False,
+        show_selected=False,
+        show_description=True,
+        use_arrow_keys=True,
+        initial_choice=initial_choice,
+    )
+
+    def get_prompt_tokens() -> list[tuple[str, str]]:
+        return [
+            ("class:qmark", DEFAULT_QUESTION_PREFIX),
+            ("class:question", f" {prompt} "),
+            ("class:instruction", instruction),
+        ]
+
+    layout = questionary_common.create_inquirer_layout(
+        inquirer_control,
+        get_prompt_tokens,
+    )
+    bindings = KeyBindings()
+
+    @bindings.add(Keys.ControlQ, eager=True)
+    @bindings.add(Keys.ControlC, eager=True)
+    def _abort(event: Any) -> None:
+        event.app.exit(exception=KeyboardInterrupt, style="class:aborting")
+
+    def _move_cursor_down(event: Any) -> None:
+        inquirer_control.select_next()
+        while not inquirer_control.is_selection_valid():
+            inquirer_control.select_next()
+
+    def _move_cursor_up(event: Any) -> None:
+        inquirer_control.select_previous()
+        while not inquirer_control.is_selection_valid():
+            inquirer_control.select_previous()
+
+    @bindings.add(Keys.Down, eager=True)
+    def _down(event: Any) -> None:
+        _move_cursor_down(event)
+
+    @bindings.add(Keys.Up, eager=True)
+    def _up(event: Any) -> None:
+        _move_cursor_up(event)
+
+    @bindings.add("j", eager=True)
+    def _j(event: Any) -> None:
+        _move_cursor_down(event)
+
+    @bindings.add("k", eager=True)
+    def _k(event: Any) -> None:
+        _move_cursor_up(event)
+
+    @bindings.add(Keys.ControlN, eager=True)
+    def _ctrl_n(event: Any) -> None:
+        _move_cursor_down(event)
+
+    @bindings.add(Keys.ControlP, eager=True)
+    def _ctrl_p(event: Any) -> None:
+        _move_cursor_up(event)
+
+    @bindings.add(Keys.ControlM, eager=True)
+    def _submit(event: Any) -> None:
+        inquirer_control.is_answered = True
+        event.app.exit(result=inquirer_control.get_pointed_at().value)
+
+    @bindings.add(Keys.Any)
+    def _ignore_other_keys(event: Any) -> None:
+        del event
+
+    return Question(
+        Application(
+            layout=layout,
+            key_bindings=bindings,
+            style=merged_style,
+        )
+    ).ask()
 
 
 def main(project_root: Path | None = None) -> int:
@@ -528,16 +658,18 @@ def run_onboarding(
     output_func(
         _build_onboarding_banner(settings=settings, ollama_status=ollama_status)
     )
-    output_func("This setup updates your local project config in place.")
+    output_func("Welcome to Unclaw setup.")
+    output_func("This guide updates local files in this project only.")
+    output_func("Your models, chats, and secrets stay on your machine.")
     if prompt_ui.interactive:
-        output_func("Use arrow keys to move and Enter to confirm each choice.")
+        output_func("Use arrow keys to move, Enter to confirm, and Ctrl-C to cancel.")
     if telegram_warning is not None:
         output_func(telegram_warning)
     if local_secrets_warning is not None:
         output_func(local_secrets_warning)
 
     prompt_ui.section(
-        "Setup style",
+        "🛠 Setup style",
         "Choose how much Unclaw should decide for you during first-time setup.",
     )
     setup_mode = prompt_ui.select(
@@ -549,18 +681,18 @@ def run_onboarding(
     automatic_configuration = beginner_mode
 
     prompt_ui.section(
-        "Logging",
+        "🪵 Logging",
         "Choose how much runtime detail you want during startup and normal use.",
     )
     logging_mode = prompt_ui.select(
-        "Which live log style should Unclaw use?",
+        "Which log view should Unclaw use day to day?",
         options=_LOGGING_OPTIONS,
         default="simple" if beginner_mode else settings.app.logging.mode,
     )
 
     prompt_ui.section(
-        "Channels",
-        "Choose the exact channel preset Unclaw should write into config/app.yaml.",
+        "📡 Channels",
+        "Choose how people should talk to Unclaw in this project.",
     )
     enabled_channels = _enabled_channels_from_preset(
         _prompt_channel_preset(
@@ -570,12 +702,12 @@ def run_onboarding(
     )
 
     prompt_ui.section(
-        "Model profiles",
-        "Choose the local models used for quick replies, default chat, deeper work, and code tasks.",
+        "🧠 Model profiles",
+        "Choose the local models for quick replies, default chat, deeper work, and code tasks.",
     )
     if beginner_mode:
         model_profiles = recommended_model_profiles()
-        prompt_ui.info("Using the recommended local model profile set:")
+        prompt_ui.info("Using the recommended starter model lineup:")
         for profile_name in _PROFILE_ORDER:
             prompt_ui.info(
                 f"- {profile_name}: {model_profiles[profile_name].model_name}"
@@ -608,7 +740,10 @@ def run_onboarding(
         telegram_polling_timeout_seconds=telegram_config.polling_timeout_seconds,
     )
 
-    prompt_ui.section("Review", "Check the plan before Unclaw writes anything to disk.")
+    prompt_ui.section(
+        "📝 Review",
+        "Check the plan before Unclaw writes local configuration files.",
+    )
     _print_plan_summary(plan, output_func=output_func)
     should_write_config = prompt_ui.confirm(
         "Write this configuration now?",
@@ -621,7 +756,7 @@ def run_onboarding(
     write_onboarding_files(settings, plan)
     configured_settings = bootstrap(project_root=settings.paths.project_root)
     output_func("")
-    output_func("Configuration saved:")
+    output_func("Saved local configuration:")
     output_func(f"- {configured_settings.paths.app_config_path}")
     output_func(f"- {configured_settings.paths.models_config_path}")
     output_func(f"- {configured_settings.paths.config_dir / 'telegram.yaml'}")
@@ -635,10 +770,10 @@ def run_onboarding(
     )
 
     output_func("")
-    output_func("Next steps:")
-    output_func("- Start the terminal runtime with `unclaw start`.")
+    output_func("What to do next:")
+    output_func("- Start the terminal experience with `unclaw start`.")
     if "telegram" in enabled_channels:
-        output_func("- Start Telegram with `unclaw telegram`.")
+        output_func("- Start your Telegram bot with `unclaw telegram`.")
         output_func(
             f"- Your bot token is stored locally in `{local_secrets_path(configured_settings)}`."
         )
@@ -758,8 +893,8 @@ def _post_configure_ollama(
     prompt_ui: PromptUI,
 ) -> OllamaStatus | None:
     prompt_ui.section(
-        "Local model runtime",
-        "Check Ollama now so startup is smoother when you run Unclaw next.",
+        "🦙 Local model runtime",
+        "Check Ollama now so startup is smoother the next time you launch Unclaw.",
     )
     ollama_status = inspect_ollama()
     if not ollama_status.is_installed:
@@ -900,11 +1035,11 @@ def _prompt_channel_preset(
     default_preset: str,
 ) -> str:
     return prompt_ui.select(
-        "Which channel preset should Unclaw enable?",
+        "Which channel setup should Unclaw enable?",
         options=_CHANNEL_PRESET_OPTIONS,
         default=default_preset,
         help_text=(
-            "Pick one explicit preset. If Telegram is enabled, Unclaw will ask for "
+            "Pick one clear setup. If Telegram is enabled, Unclaw will ask for "
             "the bot token and store it locally for this project."
         ),
     )
@@ -1021,18 +1156,18 @@ def _build_profile_menu_options(
     options: list[MenuOption] = [
         MenuOption(
             value="current",
-            label=f"Keep current configured model: {current_model_name}",
+            label=f"Keep current model: {current_model_name}",
             description=(
-                "Leave this profile exactly as configured."
+                "Leave this profile exactly as it is."
                 if has_current_profile
-                else "No current profile found, so this uses the detected fallback."
+                else "No current profile was found, so this uses the detected fallback."
             ),
         ),
         MenuOption(
             value="recommended",
-            label=f"Switch to recommended model: {recommended_model_name}",
+            label=f"Use recommended model: {recommended_model_name}",
             description=(
-                "Matches the current config."
+                "This already matches the current config."
                 if current_model_name == recommended_model_name
                 else "Use the updated local-friendly default for this role."
             ),
@@ -1043,16 +1178,14 @@ def _build_profile_menu_options(
             MenuOption(
                 value="installed",
                 label="Choose from installed Ollama models",
-                description=(
-                    f"{len(installed_model_names)} local model(s) detected in Ollama."
-                ),
+                description=f"{len(installed_model_names)} local model(s) detected in Ollama.",
             )
         )
     options.append(
         MenuOption(
             value="custom",
             label="Enter a custom model name",
-            description="Type another local model name manually.",
+            description="Type another local model name yourself.",
         )
     )
     return tuple(options), "current" if has_current_profile else "recommended"
@@ -1070,7 +1203,7 @@ def _build_profile_help_text(
             f"{len(installed_model_names)} installed model(s) available."
         )
     return (
-        f"{base_text} Start Ollama to browse installed local models during setup."
+        f"{base_text} Start Ollama if you want to browse installed local models during setup."
     )
 
 
@@ -1103,7 +1236,7 @@ def _prompt_installed_model_name(
         f"Installed Ollama model for {profile_name}",
         options=options,
         default=default_model_name,
-        help_text="Choose one of the local models already installed in Ollama.",
+        help_text="Choose one of the local models already available in Ollama.",
     )
 
 
@@ -1113,14 +1246,15 @@ def _prompt_telegram_bot_token(
     prompt_ui: PromptUI,
 ) -> str:
     prompt_ui.section(
-        "Telegram bot",
+        "🤖 Telegram bot",
         (
-            "Paste your Telegram bot token. Unclaw stores it locally in "
-            "config/secrets.yaml for this project."
+            "Connect your Telegram bot with the token from BotFather. "
+            "Unclaw stores it locally in `config/secrets.yaml` for this project."
         ),
     )
-    prompt_ui.info("Paste your Telegram bot token")
+    prompt_ui.info("Get this token from BotFather after you create or open your bot.")
     prompt_ui.info("Example format: 123456789:AA...")
+    prompt_ui.info("The token stays visible while you type so you can verify the paste.")
     prompt_ui.info(
         "Advanced fallback: `unclaw telegram` can still read "
         f"`{DEFAULT_TELEGRAM_TOKEN_ENV_VAR}` from the environment."
@@ -1128,20 +1262,21 @@ def _prompt_telegram_bot_token(
 
     if existing_token is not None:
         keep_existing = prompt_ui.confirm(
-            "Keep the Telegram bot token already stored locally for this project?",
+            "Keep the Telegram bot token already stored in `config/secrets.yaml`?",
             default=True,
-            help_text="Choose No if you want to replace it with a new token.",
+            help_text="Choose No if you want to replace it with a fresh token from BotFather.",
         )
         if keep_existing:
             return existing_token
 
     return prompt_ui.text(
-        "Paste your Telegram bot token",
+        "Telegram bot token",
         default="",
         help_text=(
-            "Paste the full token from BotFather. It will be written to "
+            "Paste the full token from BotFather. Unclaw will write it to "
             "`config/secrets.yaml` for this project."
         ),
+        instruction="Visible while typing. Press Enter to save it locally.",
         validator=_validate_telegram_bot_token,
     )
 
@@ -1173,17 +1308,19 @@ def _draft_from_profile(profile: ModelProfile) -> ModelProfileDraft:
 
 def _print_plan_summary(plan: OnboardingPlan, *, output_func: OutputFunc) -> None:
     output_func(
-        f"- setup: {'recommended guided' if plan.beginner_mode else 'advanced custom'}"
+        "- Setup style: "
+        f"{'recommended guided' if plan.beginner_mode else 'advanced custom'}"
     )
-    output_func(f"- logging: {plan.logging_mode}")
+    output_func(f"- Logging: {plan.logging_mode}")
     output_func(
-        f"- terminal_enabled: {str('terminal' in plan.enabled_channels).lower()}"
+        "- Channels: "
+        + ", ".join(
+            channel_name for channel_name in ("terminal", "telegram") if channel_name in plan.enabled_channels
+        )
     )
-    output_func(
-        f"- telegram_enabled: {str('telegram' in plan.enabled_channels).lower()}"
-    )
+    output_func("- Model lineup:")
     for profile_name in _PROFILE_ORDER:
-        output_func(f"- {profile_name}: {plan.model_profiles[profile_name].model_name}")
+        output_func(f"  {profile_name}: {plan.model_profiles[profile_name].model_name}")
     if "telegram" in plan.enabled_channels:
         output_func("- Telegram token: stored locally in config/secrets.yaml")
         output_func(
@@ -1210,7 +1347,7 @@ def _describe_ollama_status(ollama_status: OllamaStatus) -> str:
 
 def _build_onboarding_banner(*, settings: Settings, ollama_status: OllamaStatus) -> str:
     return build_banner(
-        title="Onboarding",
+        title="Unclaw setup",
         subtitle="Guided local setup for channels, models, and startup defaults.",
         rows=(
             ("project", str(settings.paths.project_root)),
@@ -1260,9 +1397,3 @@ def _describe_installed_model(
     if not tags:
         return None
     return ", ".join(tags)
-
-
-def _render_menu_title(option: MenuOption) -> str:
-    if option.description:
-        return f"{option.label} - {option.description}"
-    return option.label

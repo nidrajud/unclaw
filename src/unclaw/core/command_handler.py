@@ -301,30 +301,35 @@ class CommandHandler:
             return self._usage("/help")
 
         lines = [
-            "Available commands:",
+            "Available slash commands for this channel:",
+            "",
             "Sessions:",
-            "/new",
-            "/sessions",
-            "/use <session_id>",
+            "/new               Start a fresh session.",
+            "/sessions          List recent sessions.",
+            "/use <session_id>  Switch to an existing session.",
+            "",
             "Models:",
-            "/model",
-            "/model <profile_name>",
-            "/think",
-            "/think on",
-            "/think off",
+            "/model                 Show the active model profile.",
+            "/model <profile_name>  Switch model profiles.",
+            "/think                 Show thinking mode status.",
+            "/think on              Turn thinking mode on.",
+            "/think off             Turn thinking mode off.",
+            "",
             "Tools:",
-            "/tools",
-            "/read <path>",
-            "/ls <path>",
-            "/fetch <url>",
+            "/tools       List built-in tools.",
+            "/read <path> Read one local file.",
+            "/ls <path>   List one local directory.",
+            "/fetch <url> Fetch one URL.",
+            "",
             "Memory:",
-            "/session",
-            "/summary",
-            "Other:",
-            "/help",
+            "/session  Show the current session state.",
+            "/summary  Show the saved session summary.",
+            "",
+            "General:",
+            "/help  Show this command list.",
         ]
         if self.allow_exit:
-            lines.append("/exit")
+            lines.append("/exit  Leave the terminal runtime.")
         return self._ok(*lines)
 
     def _handle_exit(self, arguments: tuple[str, ...]) -> CommandResult:
