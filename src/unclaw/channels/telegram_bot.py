@@ -29,6 +29,7 @@ from unclaw.memory import MemoryManager
 from unclaw.schemas.chat import MessageRole
 from unclaw.schemas.session import SessionRecord
 from unclaw.settings import Settings
+from unclaw.startup import build_banner, build_startup_report, format_startup_report
 from unclaw.tools.contracts import ToolDefinition, ToolResult
 
 LOGGER = logging.getLogger(__name__)
@@ -42,7 +43,6 @@ _MESSAGE_LIMIT = 4000
 class TelegramConfig:
     """Minimal Telegram channel configuration."""
 
-    enabled: bool
     bot_token_env_var: str
     polling_timeout_seconds: int
     allowed_chat_ids: frozenset[int]
@@ -394,20 +394,18 @@ def load_telegram_config(settings: Settings) -> TelegramConfig:
     config_path = settings.paths.config_dir / _TELEGRAM_CONFIG_FILE_NAME
     payload = _load_yaml_mapping(config_path)
 
-    enabled = _read_bool(payload, "enabled", default=False)
     bot_token_env_var = _read_str(payload, "bot_token_env_var")
     polling_timeout_seconds = _read_int(payload, "polling_timeout_seconds", minimum=1)
     allowed_chat_ids = _read_allowed_chat_ids(payload.get("allowed_chat_ids"))
 
     return TelegramConfig(
-        enabled=enabled,
         bot_token_env_var=bot_token_env_var,
         polling_timeout_seconds=polling_timeout_seconds,
         allowed_chat_ids=allowed_chat_ids,
     )
 
 
-def main() -> int:
+def main(project_root: Path | None = None) -> int:
     """Run the Telegram polling channel."""
 
     logging.basicConfig(
@@ -417,13 +415,40 @@ def main() -> int:
 
     session_manager: SessionManager | None = None
     try:
-        settings = bootstrap()
+        settings = bootstrap(project_root=project_root)
         telegram_config = load_telegram_config(settings)
-        if not telegram_config.enabled:
-            print(
-                "Telegram channel is disabled in config/telegram.yaml.",
-                file=sys.stderr,
+        startup_report = build_startup_report(
+            settings,
+            channel_name="telegram",
+            channel_enabled=settings.app.channels.telegram_enabled,
+            required_profile_names=(settings.app.default_model_profile,),
+            optional_profile_names=tuple(
+                profile_name
+                for profile_name in settings.models
+                if profile_name != settings.app.default_model_profile
+            ),
+            telegram_token_env_var=telegram_config.bot_token_env_var,
+        )
+        print(
+            build_banner(
+                title="Unclaw Telegram",
+                subtitle="Local-first bot channel backed by your local model runtime.",
+                rows=(
+                    ("mode", "telegram"),
+                    (
+                        "default",
+                        (
+                            f"{settings.app.default_model_profile} -> "
+                            f"{settings.default_model.model_name}"
+                        ),
+                    ),
+                    ("logging", settings.app.logging.mode),
+                    ("polling", f"{telegram_config.polling_timeout_seconds}s"),
+                ),
             )
+        )
+        print(format_startup_report(startup_report))
+        if startup_report.has_errors:
             return 1
 
         bot_token = os.environ.get(telegram_config.bot_token_env_var)

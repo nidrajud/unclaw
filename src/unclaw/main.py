@@ -1,50 +1,60 @@
-"""Main entry point for the Unclaw runtime."""
+"""Unified command entrypoint for the Unclaw runtime."""
 
 from __future__ import annotations
 
-import sys
+import argparse
+from pathlib import Path
+from typing import Sequence
 
-from unclaw.bootstrap import bootstrap
-from unclaw.errors import UnclawError
-from unclaw.settings import Settings
-
-
-def main() -> int:
-    try:
-        settings = bootstrap()
-    except UnclawError as exc:
-        print(f"Failed to start Unclaw: {exc}", file=sys.stderr)
-        return 1
-
-    _print_startup_summary(settings)
-    return 0
+from unclaw import __version__
+from unclaw.channels import cli as cli_channel
+from unclaw.channels import telegram_bot
+from unclaw.onboarding import main as onboarding_main
 
 
-def _print_startup_summary(settings: Settings) -> None:
-    print(f"{settings.app.display_name} 🦐 ready")
-    print(
-        "Environment: "
-        f"{settings.app.environment} | "
-        f"Default model: {settings.app.default_model_profile} "
-        f"({settings.default_model.model_name})"
+def main(argv: Sequence[str] | None = None) -> int:
+    """Dispatch the user-facing `unclaw` command."""
+
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    command_name = args.command or "start"
+    project_root = args.project_root
+
+    if command_name == "start":
+        return cli_channel.main(project_root=project_root)
+    if command_name == "telegram":
+        return telegram_bot.main(project_root=project_root)
+    if command_name == "onboard":
+        return onboarding_main(project_root=project_root)
+
+    parser.error(f"Unsupported command: {command_name}")
+    return 2
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the small public command parser."""
+
+    parser = argparse.ArgumentParser(
+        prog="unclaw",
+        description="Local-first AI agent runtime.",
     )
-    print("Runtime paths:")
-    for label, path in _runtime_path_rows(settings):
-        print(f"  {label:<14} {path}")
-
-
-def _runtime_path_rows(settings: Settings) -> tuple[tuple[str, str], ...]:
-    return (
-        ("project_root", str(settings.paths.project_root)),
-        ("config_dir", str(settings.paths.config_dir)),
-        ("data_dir", str(settings.paths.data_dir)),
-        ("database", str(settings.paths.database_path)),
-        ("logs_dir", str(settings.paths.logs_dir)),
-        ("log_file", str(settings.paths.log_file_path)),
-        ("sessions_dir", str(settings.paths.sessions_dir)),
-        ("cache_dir", str(settings.paths.cache_dir)),
-        ("files_dir", str(settings.paths.files_dir)),
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
     )
+    parser.add_argument(
+        "--project-root",
+        type=Path,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+
+    subparsers = parser.add_subparsers(dest="command")
+    subparsers.add_parser("start", help="Start the terminal runtime.")
+    subparsers.add_parser("telegram", help="Start the Telegram channel.")
+    subparsers.add_parser("onboard", help="Run interactive onboarding.")
+    return parser
 
 
 if __name__ == "__main__":

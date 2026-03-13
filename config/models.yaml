@@ -1,5 +1,3 @@
-# Example local model profiles.
-# Replace model_name values to match the models installed on your machine.
 profiles:
   fast:
     provider: ollama
@@ -7,17 +5,21 @@ profiles:
     temperature: 0.2
     thinking_supported: false
     tool_mode: json_plan
-
   main:
     provider: ollama
     model_name: qwen3.5:4b
     temperature: 0.3
     thinking_supported: true
     tool_mode: json_plan
-
   deep:
     provider: ollama
     model_name: qwen3.5:9b
     temperature: 0.2
+    thinking_supported: true
+    tool_mode: json_plan
+  codex:
+    provider: ollama
+    model_name: qwen2.5-coder:7b
+    temperature: 0.1
     thinking_supported: true
     tool_mode: json_plan

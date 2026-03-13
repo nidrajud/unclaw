@@ -93,6 +93,30 @@ class OllamaProvider(BaseLLMProvider):
 
         return True
 
+    def list_models(self, *, timeout_seconds: float | None = None) -> tuple[str, ...]:
+        """Return locally available Ollama model names."""
+
+        payload = self._request_json(
+            method="GET",
+            path="/api/tags",
+            payload=None,
+            timeout_seconds=timeout_seconds,
+        )
+        raw_models = payload.get("models")
+        if not isinstance(raw_models, list):
+            raise LLMResponseError("Ollama did not return a valid model list.")
+
+        model_names: list[str] = []
+        for raw_model in raw_models:
+            if not isinstance(raw_model, dict):
+                continue
+            model_name = raw_model.get("name")
+            if not isinstance(model_name, str) or not model_name.strip():
+                continue
+            model_names.append(model_name.strip())
+
+        return tuple(model_names)
+
     def _request_json(
         self,
         *,

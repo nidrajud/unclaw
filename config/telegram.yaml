@@ -1,9 +1,3 @@
-enabled: false
 bot_token_env_var: TELEGRAM_BOT_TOKEN
 polling_timeout_seconds: 30
-
-# Leave this empty to allow every chat that can reach the bot.
-# Add Telegram chat ids to restrict access, for example:
-# allowed_chat_ids:
-#   - 123456789
 allowed_chat_ids: []

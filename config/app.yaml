@@ -2,7 +2,6 @@ app:
   name: unclaw
   display_name: Unclaw
   environment: development
-
 paths:
   data_dir: data
   logs_dir: logs
@@ -10,15 +9,16 @@ paths:
   cache_dir: cache
   files_dir: files
   database_file: app.db
-
 logging:
-  level: INFO
+  level: DEBUG
+  mode: full
   console_enabled: true
   file_enabled: true
   file_name: runtime.log
-
+channels:
+  terminal_enabled: false
+  telegram_enabled: true
 models:
   default_profile: main
-
 thinking:
   default_enabled: false

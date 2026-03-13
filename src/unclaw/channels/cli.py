@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 from unclaw.bootstrap import bootstrap
 from unclaw.core.command_handler import CommandHandler, CommandResult, CommandStatus
@@ -15,13 +16,35 @@ from unclaw.logs.tracer import Tracer
 from unclaw.memory import MemoryManager
 from unclaw.schemas.chat import MessageRole
 from unclaw.settings import Settings
+from unclaw.startup import (
+    StartupReport,
+    build_banner,
+    build_startup_report,
+    format_startup_report,
+)
 from unclaw.tools.contracts import ToolDefinition, ToolResult
 
 
-def main() -> int:
+def main(project_root: Path | None = None) -> int:
     """Run the interactive Unclaw CLI."""
     try:
-        settings = bootstrap()
+        settings = bootstrap(project_root=project_root)
+        startup_report = build_startup_report(
+            settings,
+            channel_name="terminal",
+            channel_enabled=settings.app.channels.terminal_enabled,
+            required_profile_names=(settings.app.default_model_profile,),
+            optional_profile_names=tuple(
+                profile_name
+                for profile_name in settings.models
+                if profile_name != settings.app.default_model_profile
+            ),
+        )
+        if startup_report.has_errors:
+            print(_build_preflight_banner(settings))
+            print(format_startup_report(startup_report))
+            return 1
+
         session_manager = SessionManager.from_settings(settings)
         memory_manager = MemoryManager(session_manager=session_manager)
         current_session = session_manager.ensure_current_session()
@@ -45,6 +68,7 @@ def main() -> int:
             settings=settings,
             session_id=current_session.id,
             command_handler=command_handler,
+            startup_report=startup_report,
         )
         return run_cli(
             session_manager=session_manager,
@@ -119,15 +143,44 @@ def _print_banner(
     settings: Settings,
     session_id: str,
     command_handler: CommandHandler,
+    startup_report: StartupReport,
 ) -> None:
-    print(f"{settings.app.display_name} 🦐")
-    print("Local-first agent runtime")
     print(
-        f"Session: {session_id} | "
-        f"Model: {command_handler.current_model_profile_name} | "
-        f"Thinking: {command_handler.thinking_label}"
+        build_banner(
+            title="Unclaw terminal",
+            subtitle="Local-first assistant runtime with live local model routing.",
+            rows=(
+                ("mode", "terminal"),
+                ("session", session_id),
+                (
+                    "default",
+                    (
+                        f"{command_handler.current_model_profile_name} -> "
+                        f"{command_handler.current_model_profile.model_name}"
+                    ),
+                ),
+                ("thinking", command_handler.thinking_label),
+                ("logging", settings.app.logging.mode),
+            ),
+        )
     )
-    print("Type /help for commands.")
+    print(format_startup_report(startup_report))
+    print("Type /help for commands. Press Ctrl-D or use /exit to leave.")
+
+
+def _build_preflight_banner(settings: Settings) -> str:
+    return build_banner(
+        title="Unclaw terminal",
+        subtitle="Local-first assistant runtime with live local model routing.",
+        rows=(
+            ("mode", "terminal"),
+            (
+                "default",
+                f"{settings.app.default_model_profile} -> {settings.default_model.model_name}",
+            ),
+            ("logging", settings.app.logging.mode),
+        ),
+    )
 
 
 def _build_prompt(command_handler: CommandHandler) -> str:

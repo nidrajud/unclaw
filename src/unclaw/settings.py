@@ -41,9 +41,16 @@ class DirectorySettings:
 @dataclass(frozen=True, slots=True)
 class LoggingSettings:
     level: str
+    mode: str
     console_enabled: bool
     file_enabled: bool
     file_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class ChannelSettings:
+    terminal_enabled: bool
+    telegram_enabled: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +65,7 @@ class AppSettings:
     environment: str
     directories: DirectorySettings
     logging: LoggingSettings
+    channels: ChannelSettings
     default_model_profile: str
     thinking: ThinkingSettings
 
@@ -191,6 +199,7 @@ def _build_app_settings(payload: Mapping[str, Any]) -> AppSettings:
     app_section = _get_mapping(payload, "app")
     paths_section = _get_mapping(payload, "paths")
     logging_section = _get_mapping(payload, "logging")
+    channels_section = _get_mapping(payload, "channels")
     models_section = _get_mapping(payload, "models")
     thinking_section = _get_mapping(payload, "thinking")
 
@@ -204,9 +213,14 @@ def _build_app_settings(payload: Mapping[str, Any]) -> AppSettings:
     )
     logging_settings = LoggingSettings(
         level=_get_str(logging_section, "level", "INFO"),
+        mode=_get_choice(logging_section, "mode", "simple", {"simple", "full"}),
         console_enabled=_get_bool(logging_section, "console_enabled", True),
         file_enabled=_get_bool(logging_section, "file_enabled", True),
         file_name=_get_str(logging_section, "file_name", LOG_FILE_NAME),
+    )
+    channel_settings = ChannelSettings(
+        terminal_enabled=_get_bool(channels_section, "terminal_enabled", True),
+        telegram_enabled=_get_bool(channels_section, "telegram_enabled", False),
     )
     thinking_settings = ThinkingSettings(
         default_enabled=_get_bool(thinking_section, "default_enabled", False),
@@ -218,6 +232,7 @@ def _build_app_settings(payload: Mapping[str, Any]) -> AppSettings:
         environment=_get_str(app_section, "environment", "development"),
         directories=directories,
         logging=logging_settings,
+        channels=channel_settings,
         default_model_profile=_get_str(models_section, "default_profile"),
         thinking=thinking_settings,
     )
@@ -322,3 +337,19 @@ def _get_float(source: Mapping[str, Any], key: str) -> float:
     if not isinstance(value, (int, float)):
         raise ConfigurationError(f"Configuration key '{key}' must be numeric.")
     return float(value)
+
+
+def _get_choice(
+    source: Mapping[str, Any],
+    key: str,
+    default: str,
+    allowed_values: set[str],
+) -> str:
+    value = _get_str(source, key, default)
+    normalized_value = value.strip().lower()
+    if normalized_value not in allowed_values:
+        allowed = ", ".join(sorted(allowed_values))
+        raise ConfigurationError(
+            f"Configuration key '{key}' must be one of: {allowed}."
+        )
+    return normalized_value
