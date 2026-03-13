@@ -6,12 +6,13 @@ import sys
 
 from unclaw.bootstrap import bootstrap
 from unclaw.core.command_handler import CommandHandler, CommandResult, CommandStatus
+from unclaw.core.runtime import run_user_turn
 from unclaw.core.session_manager import SessionManager
 from unclaw.errors import UnclawError
+from unclaw.logs.event_bus import EventBus
+from unclaw.logs.tracer import Tracer
 from unclaw.schemas.chat import MessageRole
 from unclaw.settings import Settings
-
-_PLACEHOLDER_ASSISTANT_REPLY = "Runtime pipeline not implemented yet."
 
 
 def main() -> int:
@@ -20,6 +21,11 @@ def main() -> int:
         settings = bootstrap()
         session_manager = SessionManager.from_settings(settings)
         current_session = session_manager.ensure_current_session()
+        event_bus = EventBus()
+        tracer = Tracer(
+            event_bus=event_bus,
+            event_repository=session_manager.event_repository,
+        )
         command_handler = CommandHandler(
             settings=settings,
             session_manager=session_manager,
@@ -34,7 +40,11 @@ def main() -> int:
             session_id=current_session.id,
             command_handler=command_handler,
         )
-        return run_cli(session_manager=session_manager, command_handler=command_handler)
+        return run_cli(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            tracer=tracer,
+        )
     finally:
         session_manager.close()
 
@@ -43,6 +53,7 @@ def run_cli(
     *,
     session_manager: SessionManager,
     command_handler: CommandHandler,
+    tracer: Tracer,
 ) -> int:
     """Run the interactive read-eval-print loop."""
     while True:
@@ -74,13 +85,11 @@ def run_cli(
             stripped_input,
             session_id=session.id,
         )
-
-        # Temporary placeholder until the runtime pipeline is wired in.
-        assistant_reply = _PLACEHOLDER_ASSISTANT_REPLY
-        session_manager.add_message(
-            MessageRole.ASSISTANT,
-            assistant_reply,
-            session_id=session.id,
+        assistant_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input=stripped_input,
+            tracer=tracer,
         )
         print(f"assistant> {assistant_reply}")
 
