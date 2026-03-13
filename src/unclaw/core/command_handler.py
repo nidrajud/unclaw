@@ -1,16 +1,20 @@
-"""Slash command parsing and handling for the CLI channel."""
+"""Slash command parsing and handling shared by interactive channels."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
 from shlex import split as shlex_split
+from typing import TYPE_CHECKING
 
 from unclaw.core.executor import resolve_builtin_tool_command
 from unclaw.core.session_manager import SessionManager, SessionManagerError
 from unclaw.schemas.session import SessionSummary
 from unclaw.settings import ModelProfile, Settings
 from unclaw.tools.contracts import ToolCall
+
+if TYPE_CHECKING:
+    from unclaw.memory import MemoryManager
 
 
 class CommandStatus(StrEnum):
@@ -50,8 +54,10 @@ class CommandHandler:
 
     settings: Settings
     session_manager: SessionManager
+    memory_manager: MemoryManager | None = None
     current_model_profile_name: str | None = None
     thinking_enabled: bool | None = None
+    allow_exit: bool = True
 
     def __post_init__(self) -> None:
         if self.current_model_profile_name is None:
@@ -90,6 +96,10 @@ class CommandHandler:
                     return self._handle_sessions(parsed_command.arguments)
                 case "use":
                     return self._handle_use(parsed_command.arguments)
+                case "summary":
+                    return self._handle_summary(parsed_command.arguments)
+                case "session":
+                    return self._handle_session(parsed_command.arguments)
                 case "model":
                     return self._handle_model(parsed_command.arguments)
                 case "think":
@@ -155,6 +165,40 @@ class CommandHandler:
             f"Switched to session {session.id}.",
             f"Title: {session.title}",
         )
+
+    def _handle_summary(self, arguments: tuple[str, ...]) -> CommandResult:
+        if arguments:
+            return self._usage("/summary")
+        if self.memory_manager is None:
+            return self._error("Session memory is not available in this channel.")
+
+        summary_text = self.memory_manager.get_session_summary()
+        return self._ok("Session summary:", summary_text)
+
+    def _handle_session(self, arguments: tuple[str, ...]) -> CommandResult:
+        if arguments:
+            return self._usage("/session")
+        if self.memory_manager is None:
+            return self._error("Session memory is not available in this channel.")
+
+        state = self.memory_manager.get_session_state()
+        lines = [
+            f"Session: {state.session_id}",
+            f"Title: {state.title}",
+            f"Updated: {state.updated_at}",
+            (
+                "Messages: "
+                f"{state.message_count} total | "
+                f"{state.user_message_count} user | "
+                f"{state.assistant_message_count} assistant"
+            ),
+            f"Summary: {state.summary_text}",
+        ]
+        if state.recent_snippets:
+            lines.append("Recent snippets:")
+            lines.extend(state.recent_snippets)
+
+        return self._ok(*lines)
 
     def _handle_model(self, arguments: tuple[str, ...]) -> CommandResult:
         if not arguments:
@@ -256,7 +300,7 @@ class CommandHandler:
         if arguments:
             return self._usage("/help")
 
-        return self._ok(
+        lines = [
             "Available commands:",
             "Sessions:",
             "/new",
@@ -278,10 +322,14 @@ class CommandHandler:
             "/summary",
             "Other:",
             "/help",
-            "/exit",
-        )
+        ]
+        if self.allow_exit:
+            lines.append("/exit")
+        return self._ok(*lines)
 
     def _handle_exit(self, arguments: tuple[str, ...]) -> CommandResult:
+        if not self.allow_exit:
+            return self._error("The /exit command is only available in the CLI.")
         if arguments:
             return self._usage("/exit")
         return CommandResult(status=CommandStatus.EXIT, lines=("Exiting Unclaw.",))

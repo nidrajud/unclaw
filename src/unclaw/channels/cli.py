@@ -34,6 +34,7 @@ def main() -> int:
         command_handler = CommandHandler(
             settings=settings,
             session_manager=session_manager,
+            memory_manager=memory_manager,
         )
     except UnclawError as exc:
         print(f"Failed to start Unclaw: {exc}", file=sys.stderr)
@@ -82,14 +83,6 @@ def run_cli(
             continue
 
         if stripped_input.startswith("/"):
-            memory_command_result = _handle_memory_command(
-                raw_command=stripped_input,
-                memory_manager=memory_manager,
-            )
-            if memory_command_result is not None:
-                _render_command_result(memory_command_result)
-                continue
-
             result = command_handler.handle(stripped_input)
             if result.list_tools:
                 _render_tool_list(tool_executor.list_tools())
@@ -199,64 +192,6 @@ def _render_tool_result(result: ToolResult) -> None:
     print(f"Error: {first_line}")
     for line in other_lines:
         print(line)
-
-
-def _handle_memory_command(
-    *,
-    raw_command: str,
-    memory_manager: MemoryManager,
-) -> CommandResult | None:
-    normalized = raw_command.strip()
-    parts = normalized[1:].split()
-    command = parts[0].lower()
-    arguments = parts[1:]
-
-    try:
-        if command == "summary":
-            if arguments:
-                return CommandResult(
-                    status=CommandStatus.ERROR,
-                    lines=("Usage: /summary",),
-                )
-
-            summary_text = memory_manager.get_session_summary()
-            return CommandResult(
-                status=CommandStatus.OK,
-                lines=("Session summary:", summary_text),
-            )
-
-        if command == "session":
-            if arguments:
-                return CommandResult(
-                    status=CommandStatus.ERROR,
-                    lines=("Usage: /session",),
-                )
-
-            state = memory_manager.get_session_state()
-            lines = [
-                f"Session: {state.session_id}",
-                f"Title: {state.title}",
-                f"Updated: {state.updated_at}",
-                (
-                    "Messages: "
-                    f"{state.message_count} total | "
-                    f"{state.user_message_count} user | "
-                    f"{state.assistant_message_count} assistant"
-                ),
-                f"Summary: {state.summary_text}",
-            ]
-            if state.recent_snippets:
-                lines.append("Recent snippets:")
-                lines.extend(state.recent_snippets)
-
-            return CommandResult(
-                status=CommandStatus.OK,
-                lines=tuple(lines),
-            )
-    except UnclawError as exc:
-        return CommandResult(status=CommandStatus.ERROR, lines=(str(exc),))
-
-    return None
 
 
 if __name__ == "__main__":
