@@ -1,296 +1,251 @@
-# Unclaw
+# Unclaw 🦐
 
-**OpenClaw spirit, rebuilt as a local-first, lightweight agent runtime for real consumer hardware.**
+**Local-first AI agent runtime for real local models.**  
+**Fast. Transparent. Practical. No cloud lock-in.**
 
-Unclaw is a practical Python agent shell for running small and medium local models without mandatory cloud services, recurring platform lock-in, or opaque hosted orchestration. It focuses on a sharp terminal experience, a useful Telegram control channel, simple local persistence, and a clean runtime you can inspect, modify, and extend.
+Unclaw is a lightweight agent runtime built for people who want a **real AI assistant on their own machine** — not inside a hosted black box.
 
-Today, Unclaw already gives you:
+It brings together a polished terminal experience, remote control through Telegram, live runtime logs, local tools, and model routing across multiple local profiles — all with a strong **local-first** philosophy.
 
-- a local-first runtime backed by Ollama
-- a polished terminal experience with `unclaw start`
-- a Telegram bot channel with guided setup
-- live local logs with `unclaw logs simple` and `unclaw logs full`
-- model routing across `fast`, `main`, `deep`, and `codex` profiles
-- built-in tool commands such as `/read`, `/ls`, `/fetch`, and `/tools`
-- local sessions, summaries, and a lightweight memory base
-- project-local Telegram secrets storage
-- no mandatory cloud dependency
-
-It is intentionally transparent, modular, and practical rather than pretending to be magic.
+---
 
 ## Why Unclaw
 
-Many agent projects assume hosted infra, heavyweight stacks, or expensive models by default. Unclaw takes the opposite path:
+Most agent runtimes assume:
+- cloud APIs
+- heavyweight orchestration
+- expensive hosted models
+- complex stacks that do not fit normal hardware
 
-- **Local-first by design.** Your runtime, sessions, logs, and secrets stay on your machine.
-- **Built for realistic hardware.** The defaults target small and medium Ollama models you can actually run.
-- **Simple where it matters.** Clear commands, clear config, clear logs, no giant framework tax.
-- **Useful now, extensible later.** Terminal chat, Telegram control, tools, memory, and live traces already work.
-- **No cloud lock-in.** You can inspect the code, change the prompts, swap models, and evolve the workflow locally.
+Unclaw takes the opposite path:
+
+- **Local-first by design** — your runtime, logs, sessions, and secrets stay on your machine
+- **Built for real hardware** — designed for practical local models, not datacenter-only setups
+- **Transparent** — you can inspect what the runtime is doing
+- **Lightweight** — clean architecture, simple commands, focused UX
+- **Practical** — made to be useful now, not “impressive later”
+
+Unclaw is the **OpenClaw spirit**, rebuilt as a **lighter, local-first runtime**.
+
+---
 
 ## Current Features
 
-### Runtime and UX
+### Core runtime
+- Local-first runtime powered by Ollama
+- Interactive terminal experience with `unclaw start`
+- Streaming terminal responses
+- Live model switching
+- Thinking mode support where available
+- Session persistence and local memory foundation
 
+### Guided setup
 - Guided onboarding with `unclaw onboard`
-- Interactive terminal runtime with `unclaw start`
-- Streaming terminal replies
-- Shared session system with local persistence
-- Session summaries and memory refresh
-- Polished banners and startup/preflight output
-- Safe local update flow with `unclaw update`
+- Channel selection
+- Model lineup setup
+- Telegram bot configuration
+- Local secrets storage with secure permissions
+- Clear startup and preflight checks
 
-### Models and Routing
+### Model profiles
+Unclaw currently ships with four practical profiles:
 
-- Four shipped model profiles: `fast`, `main`, `deep`, `codex`
-- Live model selection with `/model`
-- Optional thinking mode with `/think on|off`
-- Runtime routing across local profiles
-- Defaults tuned for Ollama-backed local models
+- **fast** → quick low-cost replies
+- **main** → default everyday assistant
+- **deep** → heavier reasoning
+- **codex** → code-oriented tasks
+
+Default lineup:
+- `fast` → `llama3.2:3b`
+- `main` → `qwen3.5:4b`
+- `deep` → `qwen3.5:9b`
+- `codex` → `qwen2.5-coder:7b`
 
 ### Tools
-
-- `/tools` to inspect available built-in tools
-- `/read <path>` to read one local file
-- `/ls [path]` to inspect one local directory
-- `/fetch <url>` to fetch a URL
-- Structured tool execution traces in the local log stream
+- `/tools` to inspect built-in tools
+- `/read <path>` to read a local file
+- `/ls [path]` to inspect a directory
+- `/fetch <url>` to fetch a public URL
 
 ### Channels
-
-- Terminal channel
-- Telegram bot channel sharing the same local runtime and sessions
-- Telegram slash-command support, including session and tool commands
+- Terminal runtime
+- Telegram bot channel
+- Shared sessions and runtime behavior across channels
 
 ### Observability
+- `unclaw logs` / `unclaw logs simple`
+- `unclaw logs full`
+- Live runtime tracing
+- Model, tool, route, and Telegram events
+- Execution durations
+- Reasoning metadata without exposing full reasoning text by default
 
-- `unclaw logs simple` for a concise human view
-- `unclaw logs full` for the structured runtime stream
-- Model, tool, routing, and Telegram events recorded locally
+### Maintenance
+- `unclaw update` for safe project updates
+- Project-local configuration
+- Project-local secrets file
+- Deny-by-default Telegram security model
+
+---
 
 ## Quick Start
 
-### 1. Install
-
 Unclaw targets **Python 3.12+**.
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .[dev]
-```
+### 1. Clone the repo
 
-### 2. Install and start Ollama
+    git clone https://github.com/nidrajud/unclaw.git
+    cd unclaw
 
-Unclaw is built around a local Ollama runtime.
+### 2. Create a virtual environment
 
-```bash
-ollama serve
-```
+    python3.12 -m venv .venv
+    source .venv/bin/activate
 
-Pull at least the default model if you want to skip guided setup:
+### 3. Install Unclaw
 
-```bash
-ollama pull qwen3.5:4b
-```
+    python -m pip install -e .[dev]
 
-### 3. Run onboarding
+### 4. Start Ollama
 
-```bash
-unclaw onboard
-```
+    ollama serve
 
-The onboarding flow helps you:
+### 5. Run guided setup
 
-- choose channels
-- confirm the model lineup
-- store a Telegram bot token locally if you want the Telegram channel
-- write local config files for the current project
+    unclaw onboard
 
-### 4. Start the local runtime
+### 6. Start Unclaw
 
-```bash
-unclaw start
-```
+    unclaw start
 
 Useful companion commands:
 
-```bash
-unclaw logs simple
-unclaw logs full
-unclaw update
-```
+    unclaw help
+    unclaw logs
+    unclaw logs full
+    unclaw telegram
+    unclaw update
 
-## Model Profiles
+---
 
-Unclaw ships with four practical profiles in `config/models.yaml`:
+## Runtime Commands
 
-| Profile | Default model | Purpose |
-| --- | --- | --- |
-| `fast` | `llama3.2:3b` | Quick low-cost replies |
-| `main` | `qwen3.5:4b` | Default everyday assistant profile |
-| `deep` | `qwen3.5:9b` | Heavier reasoning when you want more depth |
-| `codex` | `qwen2.5-coder:7b` | Coding-oriented local profile |
+### Top-level commands
 
-Switch profiles at runtime:
+    unclaw start
+    unclaw telegram
+    unclaw onboard
+    unclaw logs
+    unclaw logs full
+    unclaw update
+    unclaw help
 
-```text
-/model
-/model fast
-/model deep
-/think on
-/think off
-```
+### In-chat slash commands
 
-## Channels
+    /help
+    /new
+    /sessions
+    /use <session_id>
+    /model
+    /model fast
+    /model main
+    /model deep
+    /model codex
+    /think on
+    /think off
+    /tools
+    /read <path>
+    /ls [path]
+    /fetch <url>
+    /session
+    /summary
 
-### Terminal
+---
 
-The terminal channel is the core Unclaw experience:
+## Telegram Remote Control
 
-- startup preflight checks
-- session-aware chat
-- streaming assistant replies
-- slash commands for models, sessions, memory, and tools
-
-Start it with:
-
-```bash
-unclaw start
-```
-
-### Telegram
-
-Telegram is for remote control of the same local runtime, not for turning Unclaw into a cloud service.
+Unclaw includes a Telegram bot channel for remote control of the same local runtime.
 
 Start it with:
 
-```bash
-unclaw telegram
-```
+    unclaw telegram
 
-What already works:
-
-- guided Telegram token onboarding
-- local token storage in `config/secrets.yaml`
-- shared slash commands
-- shared sessions and logs
-- secure-by-default authorization
-
-Telegram is now intentionally **deny-by-default**:
-
-- `allowed_chat_ids: []` means **no chats are authorized**
+Telegram is intentionally **secure by default**:
+- no chat is authorized unless explicitly allowed
 - unauthorized chats are rejected without running the model
-- rejected chat IDs are logged so you can allowlist them later
+- rejected chat IDs are logged for later authorization
 
-To authorize Telegram access, edit `config/telegram.yaml` and add numeric chat IDs:
+Authorization commands:
 
-```yaml
-bot_token_env_var: TELEGRAM_BOT_TOKEN
-polling_timeout_seconds: 30
-allowed_chat_ids:
-  - 123456789
-```
+    unclaw telegram list
+    unclaw telegram allow-latest
+    unclaw telegram allow <chat_id>
+    unclaw telegram revoke <chat_id>
+
+This gives you remote access **without turning your bot into an open public endpoint**.
+
+---
 
 ## Security Philosophy
 
-Unclaw is local-first, but local-first does not mean careless. The current direction is:
+Unclaw is built around a simple idea:
 
-- **secure defaults first**
-- **dangerous behavior only by explicit opt-in**
-- **simple mechanisms before complicated security theater**
+**safe defaults first, more power later by explicit choice.**
 
-Current shipped defaults include:
+Current defaults include:
+- deny-by-default Telegram access
+- local secrets stored with protected permissions
+- reasoning text redacted by default in logs
+- local file tools restricted by default
+- URL fetching restricted to safer public targets by default
 
-- Telegram access is deny-by-default unless a chat ID is explicitly allowlisted
-- `config/secrets.yaml` is written with owner-only permissions
-- reasoning text is not logged unless `logging.include_reasoning_text: true`
-- runtime logs remain useful without storing more sensitive detail than necessary
+The goal is not security theater.  
+The goal is a **local-first runtime you can actually trust and operate**.
 
-This is not the end of the hardening work. It is the foundation for stronger permissions, safer tools, and clearer policy controls.
+---
 
-## Why Local-First
+## Why Local-First Matters
 
-Local-first matters for more than cost.
+Local-first is not just about saving money.
 
-- **Privacy:** your sessions, logs, summaries, and secrets remain under your control
-- **Transparency:** you can inspect exactly how the runtime behaves
-- **Reliability:** no required hosted control plane
-- **Modularity:** swap models and evolve the runtime without waiting on a vendor roadmap
-- **Practicality:** small and medium local models are improving quickly, and they are already useful for real workflows
+It means:
+- **privacy** — your sessions and secrets stay with you
+- **control** — you choose your models, setup, and policies
+- **transparency** — you can inspect what happens
+- **independence** — no mandatory cloud dependency
+- **practicality** — small and medium local models are already good enough for real workflows
 
-Unclaw is designed for that reality.
+Unclaw is built for that reality.
+
+---
 
 ## Project Status
 
-Unclaw is an early but real local runtime. It already supports:
+Unclaw is an **early but real MVP**.
 
-- local-first execution
-- terminal and Telegram channels
+It already provides:
+- a working terminal runtime
+- a working Telegram channel
 - guided onboarding
+- model profiles and routing
 - live logs
+- local tools
 - session persistence
-- memory summaries
-- built-in local file and web tools
+- memory foundations
+- safer local defaults
 
-It is not pretending to be finished. Current work in progress includes:
-
+Current work is focused on:
 - security hardening
-- stronger permissions for tools
-- better safe defaults across channels
-- richer policy and prompt management
-- a broader tool ecosystem
-- more agentic behaviors
-- stronger audit coverage and tests
-- additional channels and messengers later
+- stronger tool permissions
+- better defaults
+- richer runtime behavior
+- improved prompt and policy management
+- stronger audit coverage
+- more channels and integrations later
 
-The roadmap is about making the runtime more trustworthy and more useful without losing the lightweight local-first core.
+The goal is to grow **without losing clarity, speed, or local-first control**.
 
-## Contributing / Current State
-
-Contributions are welcome, especially if you care about:
-
-- local model ergonomics
-- clean Python architecture
-- runtime observability
-- safety and permission boundaries
-- practical agent workflows on consumer hardware
-
-Before opening large changes, keep the current shape of the project in mind:
-
-- small and readable beats clever
-- local-first is a product constraint, not marketing copy
-- shipping honest behavior matters more than making grand claims
-- better defaults are preferred over optional complexity
-
-## Command Snapshot
-
-```bash
-unclaw start
-unclaw telegram
-unclaw onboard
-unclaw logs simple
-unclaw logs full
-unclaw update
-```
-
-Inside the runtime, useful slash commands include:
-
-```text
-/help
-/new
-/sessions
-/use <session_id>
-/model <profile>
-/think on
-/think off
-/tools
-/read README.md
-/ls .
-/fetch https://example.com
-/session
-/summary
-```
+---
 
 ## License
 
