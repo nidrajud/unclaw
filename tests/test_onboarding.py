@@ -8,12 +8,21 @@ import yaml
 
 from unclaw.channels.telegram_bot import load_telegram_config
 from unclaw.errors import ConfigurationError
-from unclaw.onboarding import InteractivePromptUI, MenuOption, run_onboarding
+from unclaw.onboarding import (
+    InteractivePromptUI,
+    MenuOption,
+    ModelProfileDraft,
+    recommended_model_profiles,
+    run_onboarding,
+)
 from unclaw.settings import load_settings
 from unclaw.startup import OllamaStatus
 
 
-def test_onboarding_writes_beginner_friendly_config(monkeypatch, tmp_path: Path) -> None:
+def test_recommended_onboarding_writes_terminal_and_telegram_preset(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     project_root = _create_temp_project(tmp_path)
     settings = load_settings(project_root=project_root)
 
@@ -28,7 +37,7 @@ def test_onboarding_writes_beginner_friendly_config(monkeypatch, tmp_path: Path)
         ),
     )
 
-    responses = iter(["", "", "", "y", "", ""])
+    responses = iter(["", "", "2", "", ""])
     outputs: list[str] = []
 
     result = run_onboarding(
@@ -48,10 +57,10 @@ def test_onboarding_writes_beginner_friendly_config(monkeypatch, tmp_path: Path)
         "terminal_enabled": True,
         "telegram_enabled": True,
     }
-    assert models_payload["profiles"]["fast"]["model_name"] == "qwen3:1.7b"
+    assert models_payload["profiles"]["fast"]["model_name"] == "llama3.2:3b"
     assert models_payload["profiles"]["fast"]["thinking_supported"] is False
-    assert models_payload["profiles"]["main"]["model_name"] == "qwen3:4b"
-    assert models_payload["profiles"]["deep"]["model_name"] == "qwen3:8b"
+    assert models_payload["profiles"]["main"]["model_name"] == "qwen3.5:4b"
+    assert models_payload["profiles"]["deep"]["model_name"] == "qwen3.5:9b"
     assert models_payload["profiles"]["codex"]["model_name"] == "qwen2.5-coder:7b"
     assert telegram_payload["bot_token_env_var"] == "TELEGRAM_BOT_TOKEN"
     assert any("Ollama is not installed yet." in line for line in outputs)
@@ -71,7 +80,7 @@ def test_advanced_onboarding_can_choose_installed_and_custom_models(
             cli_path="/usr/bin/ollama",
             is_installed=True,
             is_running=True,
-            model_names=("qwen3:1.7b", "phi4-mini:3.8b", "qwen3.5:4b"),
+            model_names=("llama3.2:3b", "phi4-mini:3.8b", "qwen3.5:4b"),
             error_message=None,
         ),
     )
@@ -81,12 +90,10 @@ def test_advanced_onboarding_can_choose_installed_and_custom_models(
             "2",
             "",
             "",
-            "",
-            "",
             "3",
             "2",
             "",
-            "2",
+            "",
             "4",
             "devstral:latest",
             "",
@@ -102,11 +109,16 @@ def test_advanced_onboarding_can_choose_installed_and_custom_models(
 
     assert result == 0
 
+    app_payload = _read_yaml(project_root / "config" / "app.yaml")
     models_payload = _read_yaml(project_root / "config" / "models.yaml")
+    assert app_payload["channels"] == {
+        "terminal_enabled": True,
+        "telegram_enabled": False,
+    }
     assert models_payload["profiles"]["fast"]["model_name"] == "phi4-mini:3.8b"
     assert models_payload["profiles"]["fast"]["thinking_supported"] is False
     assert models_payload["profiles"]["main"]["model_name"] == "qwen3.5:4b"
-    assert models_payload["profiles"]["deep"]["model_name"] == "qwen3:8b"
+    assert models_payload["profiles"]["deep"]["model_name"] == "qwen3.5:9b"
     assert models_payload["profiles"]["codex"]["model_name"] == "devstral:latest"
 
 
@@ -152,6 +164,75 @@ def test_interactive_select_uses_value_for_questionary_default(monkeypatch) -> N
 
     assert result == "advanced"
     assert captured["default"] == "advanced"
+    assert captured["style"] is not None
+
+
+def test_channel_preset_writes_telegram_only_to_app_config(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+
+    monkeypatch.setattr(
+        "unclaw.onboarding.inspect_ollama",
+        lambda timeout_seconds=1.5: OllamaStatus(
+            cli_path=None,
+            is_installed=False,
+            is_running=False,
+            model_names=(),
+            error_message="not installed",
+        ),
+    )
+
+    responses = iter(["", "", "3", "", ""])
+
+    result = run_onboarding(
+        settings,
+        input_func=lambda _prompt: next(responses),
+        output_func=lambda _message: None,
+    )
+
+    assert result == 0
+
+    app_payload = _read_yaml(project_root / "config" / "app.yaml")
+    assert app_payload["channels"] == {
+        "terminal_enabled": False,
+        "telegram_enabled": True,
+    }
+
+
+def test_recommended_model_profiles_match_target_defaults() -> None:
+    assert recommended_model_profiles() == {
+        "fast": ModelProfileDraft(
+            provider="ollama",
+            model_name="llama3.2:3b",
+            temperature=0.2,
+            thinking_supported=False,
+            tool_mode="json_plan",
+        ),
+        "main": ModelProfileDraft(
+            provider="ollama",
+            model_name="qwen3.5:4b",
+            temperature=0.3,
+            thinking_supported=True,
+            tool_mode="json_plan",
+        ),
+        "deep": ModelProfileDraft(
+            provider="ollama",
+            model_name="qwen3.5:9b",
+            temperature=0.2,
+            thinking_supported=True,
+            tool_mode="json_plan",
+        ),
+        "codex": ModelProfileDraft(
+            provider="ollama",
+            model_name="qwen2.5-coder:7b",
+            temperature=0.1,
+            thinking_supported=True,
+            tool_mode="json_plan",
+        ),
+    }
 
 
 def test_load_telegram_config_rejects_pasted_bot_token(tmp_path: Path) -> None:

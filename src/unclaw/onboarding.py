@@ -37,7 +37,6 @@ except ImportError:  # pragma: no cover - exercised in environments without the 
 InputFunc: TypeAlias = Callable[[str], str]
 OutputFunc: TypeAlias = Callable[[str], None]
 
-_AVAILABLE_CHANNELS = ("terminal", "telegram")
 _PROFILE_ORDER = ("fast", "main", "deep", "codex")
 
 _PROFILE_DESCRIPTIONS = {
@@ -48,12 +47,22 @@ _PROFILE_DESCRIPTIONS = {
 }
 
 _ONBOARDING_WORDMARK = (
+    "██╗   ██╗███╗   ██╗ ██████╗██╗      █████╗ ██╗    ██╗",
+    "██║   ██║████╗  ██║██╔════╝██║     ██╔══██╗██║    ██║",
+    "██║   ██║██╔██╗ ██║██║     ██║     ███████║██║ █╗ ██║",
+    "██║   ██║██║╚██╗██║██║     ██║     ██╔══██║██║███╗██║",
+    "╚██████╔╝██║ ╚████║╚██████╗███████╗██║  ██║╚███╔███╔╝",
+    " ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝ ",
+)
+_ONBOARDING_WORDMARK_ASCII = (
     " _   _ _   _  ____ _        ___        __",
     "| | | | \\ | |/ ___| |      / _ \\ \\      / /",
     "| | | |  \\| | |   | |     | | | |\\ \\ /\\ / / ",
     "| |_| | |\\  | |___| |___  | |_| | \\ V  V /  ",
     " \\___/|_| \\_|\\____|_____|  \\___/   \\_/\\_/   ",
 )
+_ONBOARDING_TAGLINE = "🦐 Local-first AI, no cloud claws 🦐"
+_ONBOARDING_TAGLINE_ASCII = "Local-first AI, no cloud claws"
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,7 +307,11 @@ class InteractivePromptUI:
     ) -> bool:
         if help_text:
             self.output_func(help_text)
-        answer = questionary.confirm(prompt, default=default).ask()
+        answer = questionary.confirm(
+            prompt,
+            default=default,
+            style=_QUESTIONARY_STYLE,
+        ).ask()
         if answer is None:
             raise KeyboardInterrupt
         return answer
@@ -326,6 +339,7 @@ class InteractivePromptUI:
             ],
             default=default_value,
             instruction="Use arrow keys, then press Enter.",
+            style=_QUESTIONARY_STYLE,
         ).ask()
         if answer is None:
             raise KeyboardInterrupt
@@ -355,6 +369,7 @@ class InteractivePromptUI:
                     for option in options
                 ],
                 instruction="Use arrow keys to move, Space to toggle, Enter to confirm.",
+                style=_QUESTIONARY_STYLE,
             ).ask()
             if answer is None:
                 raise KeyboardInterrupt
@@ -381,6 +396,7 @@ class InteractivePromptUI:
                 prompt,
                 default=default,
                 instruction="Press Enter to confirm.",
+                style=_QUESTIONARY_STYLE,
             ).ask()
             if answer is None:
                 raise KeyboardInterrupt
@@ -400,21 +416,21 @@ class InteractivePromptUI:
 _RECOMMENDED_PROFILES: dict[str, ModelProfileDraft] = {
     "fast": ModelProfileDraft(
         provider="ollama",
-        model_name="qwen3:1.7b",
+        model_name="llama3.2:3b",
         temperature=0.2,
         thinking_supported=False,
         tool_mode="json_plan",
     ),
     "main": ModelProfileDraft(
         provider="ollama",
-        model_name="qwen3:4b",
+        model_name="qwen3.5:4b",
         temperature=0.3,
         thinking_supported=True,
         tool_mode="json_plan",
     ),
     "deep": ModelProfileDraft(
         provider="ollama",
-        model_name="qwen3:8b",
+        model_name="qwen3.5:9b",
         temperature=0.2,
         thinking_supported=True,
         tool_mode="json_plan",
@@ -432,12 +448,12 @@ _SETUP_MODE_OPTIONS = (
     MenuOption(
         value="recommended",
         label="Recommended setup",
-        description="Guided flow with practical local-first defaults.",
+        description="Use the recommended local models, then choose logging and channels.",
     ),
     MenuOption(
         value="advanced",
         label="Advanced setup",
-        description="Choose channels, logging, and each model profile manually.",
+        description="Choose logging, channels, and each model profile manually.",
     ),
 )
 
@@ -454,18 +470,41 @@ _LOGGING_OPTIONS = (
     ),
 )
 
-_CHANNEL_OPTIONS = (
+_CHANNEL_PRESET_OPTIONS = (
     MenuOption(
-        value="terminal",
-        label="Terminal chat",
-        description="Talk to Unclaw directly in this shell.",
+        value="terminal_only",
+        label="terminal_only",
+        description="Enable terminal only (terminal_enabled: true, telegram_enabled: false).",
     ),
     MenuOption(
-        value="telegram",
-        label="Telegram bot",
-        description="Reply from Telegram after you export a bot token.",
+        value="terminal_and_telegram",
+        label="terminal_and_telegram",
+        description="Enable both channels (terminal_enabled: true, telegram_enabled: true).",
+    ),
+    MenuOption(
+        value="telegram_only",
+        label="telegram_only",
+        description="Enable Telegram only (terminal_enabled: false, telegram_enabled: true).",
     ),
 )
+
+if questionary is not None:
+    _QUESTIONARY_STYLE = questionary.Style(
+        [
+            ("qmark", "fg:#7fd1ff bold"),
+            ("question", "bold"),
+            ("answer", "fg:#7be0a1 bold"),
+            ("pointer", "fg:#7fd1ff bold"),
+            ("highlighted", "fg:#101418 bg:#7fd1ff bold"),
+            ("selected", "fg:#0f1a12 bg:#7be0a1 bold"),
+            ("separator", "fg:#7a8792"),
+            ("instruction", "fg:#7a8792 italic"),
+            ("disabled", "fg:#58606a italic"),
+            ("validation-toolbar", "fg:#ffffff bg:#b42318 bold"),
+        ]
+    )
+else:  # pragma: no cover - exercised when questionary is unavailable.
+    _QUESTIONARY_STYLE = None
 
 
 def main(project_root: Path | None = None) -> int:
@@ -499,7 +538,7 @@ def run_onboarding(
     )
     output_func("This setup updates your local config files in place.")
     if prompt_ui.interactive:
-        output_func("Use arrow keys to move, Space to toggle selections, and Enter to confirm.")
+        output_func("Use arrow keys to move and Enter to confirm each choice.")
     if telegram_warning is not None:
         output_func(telegram_warning)
 
@@ -513,14 +552,7 @@ def run_onboarding(
         default="recommended",
     )
     beginner_mode = setup_mode == "recommended"
-    automatic_configuration = beginner_mode or prompt_ui.confirm(
-        "Prefer automatic help for starting Ollama and pulling missing models later?",
-        default=False,
-        help_text=(
-            "This only changes the default answer for later setup steps. "
-            "You still confirm each action."
-        ),
-    )
+    automatic_configuration = beginner_mode
 
     prompt_ui.section(
         "Logging",
@@ -534,11 +566,13 @@ def run_onboarding(
 
     prompt_ui.section(
         "Channels",
-        "Select where you want to interact with Unclaw.",
+        "Choose the exact channel preset Unclaw should write into config/app.yaml.",
     )
-    enabled_channels = _prompt_channels(
-        prompt_ui=prompt_ui,
-        default_channels=_default_channels(settings),
+    enabled_channels = _enabled_channels_from_preset(
+        _prompt_channel_preset(
+            prompt_ui=prompt_ui,
+            default_preset=_default_channel_preset(settings),
+        )
     )
 
     prompt_ui.section(
@@ -563,7 +597,6 @@ def run_onboarding(
     if "telegram" in enabled_channels:
         telegram_bot_token_env_var = _prompt_telegram_token_env_var_name(
             telegram_config=telegram_config,
-            beginner_mode=beginner_mode,
             prompt_ui=prompt_ui,
         )
 
@@ -835,28 +868,42 @@ def _build_prompt_ui(
     return FallbackPromptUI(input_func=input_func, output_func=output_func)
 
 
-def _default_channels(settings: Settings) -> tuple[str, ...]:
-    enabled_channels: list[str] = []
-    if settings.app.channels.terminal_enabled:
-        enabled_channels.append("terminal")
-    if settings.app.channels.telegram_enabled:
-        enabled_channels.append("telegram")
-    if enabled_channels:
-        return tuple(enabled_channels)
-    return ("terminal",)
+def _default_channel_preset(settings: Settings) -> str:
+    terminal_enabled = settings.app.channels.terminal_enabled
+    telegram_enabled = settings.app.channels.telegram_enabled
+    if terminal_enabled and telegram_enabled:
+        return "terminal_and_telegram"
+    if telegram_enabled:
+        return "telegram_only"
+    return "terminal_only"
 
 
-def _prompt_channels(
+def _prompt_channel_preset(
     *,
     prompt_ui: PromptUI,
-    default_channels: tuple[str, ...],
-) -> tuple[str, ...]:
-    return prompt_ui.checkbox(
-        "Which channels should Unclaw enable?",
-        options=_CHANNEL_OPTIONS,
-        default_values=default_channels,
-        help_text="You can enable both. Telegram still requires a bot token env var.",
+    default_preset: str,
+) -> str:
+    return prompt_ui.select(
+        "Which channel preset should Unclaw enable?",
+        options=_CHANNEL_PRESET_OPTIONS,
+        default=default_preset,
+        help_text=(
+            "Pick one explicit preset. Telegram still requires a bot token "
+            "environment variable."
+        ),
     )
+
+
+def _enabled_channels_from_preset(channel_preset: str) -> tuple[str, ...]:
+    match channel_preset:
+        case "terminal_only":
+            return ("terminal",)
+        case "terminal_and_telegram":
+            return ("terminal", "telegram")
+        case "telegram_only":
+            return ("telegram",)
+        case _:
+            raise ValueError(f"Unsupported channel preset: {channel_preset}")
 
 
 def _prompt_model_profiles(
@@ -1047,28 +1094,18 @@ def _prompt_installed_model_name(
 def _prompt_telegram_token_env_var_name(
     *,
     telegram_config: TelegramConfig,
-    beginner_mode: bool,
     prompt_ui: PromptUI,
 ) -> str:
     prompt_ui.section(
         "Telegram token",
         "This step asks for the environment variable name, not the bot token value itself.",
     )
-    prompt_ui.info(
-        "Example env var name: TELEGRAM_BOT_TOKEN"
-    )
+    prompt_ui.info("Example env var name: TELEGRAM_BOT_TOKEN")
     prompt_ui.info(
         "Later you will export it like: export TELEGRAM_BOT_TOKEN=<your bot token>"
     )
 
     default_name = telegram_config.bot_token_env_var or DEFAULT_TELEGRAM_TOKEN_ENV_VAR
-    if beginner_mode and default_name == DEFAULT_TELEGRAM_TOKEN_ENV_VAR:
-        use_default = prompt_ui.confirm(
-            f"Use {DEFAULT_TELEGRAM_TOKEN_ENV_VAR} as the environment variable name?",
-            default=True,
-        )
-        if use_default:
-            return DEFAULT_TELEGRAM_TOKEN_ENV_VAR
 
     return prompt_ui.text(
         "Environment variable name for the Telegram bot token",
@@ -1109,11 +1146,13 @@ def _print_plan_summary(plan: OnboardingPlan, *, output_func: OutputFunc) -> Non
     output_func(
         f"- setup: {'recommended guided' if plan.beginner_mode else 'advanced custom'}"
     )
-    output_func(
-        f"- automation defaults: {'on' if plan.automatic_configuration else 'off'}"
-    )
     output_func(f"- logging: {plan.logging_mode}")
-    output_func(f"- channels: {', '.join(plan.enabled_channels)}")
+    output_func(
+        f"- terminal_enabled: {str('terminal' in plan.enabled_channels).lower()}"
+    )
+    output_func(
+        f"- telegram_enabled: {str('telegram' in plan.enabled_channels).lower()}"
+    )
     for profile_name in _PROFILE_ORDER:
         output_func(f"- {profile_name}: {plan.model_profiles[profile_name].model_name}")
     if "telegram" in plan.enabled_channels:
@@ -1138,8 +1177,7 @@ def _describe_ollama_status(ollama_status: OllamaStatus) -> str:
 
 
 def _build_onboarding_banner(*, settings: Settings, ollama_status: OllamaStatus) -> str:
-    title = "UNCLAW ONBOARDING"
-    subtitle = "Guided local-first setup for terminal chat and Telegram access."
+    wordmark, tagline = _render_onboarding_wordmark()
     rows = (
         ("project", str(settings.paths.project_root)),
         ("config", str(settings.paths.config_dir)),
@@ -1147,16 +1185,15 @@ def _build_onboarding_banner(*, settings: Settings, ollama_status: OllamaStatus)
     )
     width = max(
         76,
-        len(title),
-        len(subtitle),
-        *(len(line) for line in _ONBOARDING_WORDMARK),
+        len(tagline),
+        *(len(line) for line in wordmark),
         *(len(_format_banner_row(label, value)) for label, value in rows),
     )
 
     lines = [_banner_border("=", width)]
-    lines.extend(_banner_line(line, width) for line in _ONBOARDING_WORDMARK)
-    lines.append(_banner_line(title, width))
-    lines.append(_banner_line(subtitle, width))
+    lines.extend(_banner_line(line, width) for line in wordmark)
+    lines.append(_banner_line("", width))
+    lines.append(_banner_line(tagline.center(width), width))
     lines.append(_banner_border("-", width))
     lines.extend(
         _banner_line(_format_banner_row(label, value), width)
@@ -1172,6 +1209,12 @@ def _unique_model_names(missing_profiles: tuple[tuple[str, str], ...]) -> tuple[
     )
 
 
+def _render_onboarding_wordmark() -> tuple[tuple[str, ...], str]:
+    if _stdout_supports_text((*_ONBOARDING_WORDMARK, _ONBOARDING_TAGLINE)):
+        return _ONBOARDING_WORDMARK, _ONBOARDING_TAGLINE
+    return _ONBOARDING_WORDMARK_ASCII, _ONBOARDING_TAGLINE_ASCII
+
+
 def _format_banner_row(label: str, value: str) -> str:
     return f"{label.upper():<10} {value}"
 
@@ -1182,6 +1225,16 @@ def _banner_border(fill: str, width: int) -> str:
 
 def _banner_line(content: str, width: int) -> str:
     return f"| {content:<{width}} |"
+
+
+def _stdout_supports_text(lines: tuple[str, ...]) -> bool:
+    encoding = sys.stdout.encoding or "utf-8"
+    try:
+        for line in lines:
+            line.encode(encoding)
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _resolve_select_default(*, options: tuple[MenuOption, ...], default: str) -> str:

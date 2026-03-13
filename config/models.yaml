@@ -1,19 +1,19 @@
 profiles:
   fast:
     provider: ollama
-    model_name: qwen3:1.7b
+    model_name: llama3.2:3b
     temperature: 0.2
     thinking_supported: false
     tool_mode: json_plan
   main:
     provider: ollama
-    model_name: qwen3:4b
+    model_name: qwen3.5:4b
     temperature: 0.3
     thinking_supported: true
     tool_mode: json_plan
   deep:
     provider: ollama
-    model_name: qwen3:8b
+    model_name: qwen3.5:9b
     temperature: 0.2
     thinking_supported: true
     tool_mode: json_plan
