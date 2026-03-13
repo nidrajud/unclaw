@@ -96,6 +96,15 @@ def test_main_help_mentions_telegram_management_commands(capsys) -> None:
     assert "unclaw telegram list" in help_text
 
 
+def test_main_help_uses_logs_as_the_canonical_simple_command(capsys) -> None:
+    unclaw_main.main(["help"])
+    help_text = capsys.readouterr().out
+
+    assert "  unclaw logs\n" in help_text
+    assert "  unclaw logs full\n" in help_text
+    assert "  unclaw logs simple\n" not in help_text
+
+
 def test_main_dispatches_logs_with_default_simple(
     monkeypatch,
     tmp_path: Path,
@@ -130,6 +139,24 @@ def test_main_dispatches_logs_with_explicit_full(
     assert unclaw_main.main(["--project-root", str(tmp_path), "logs", "full"]) == 66
     assert captured["project_root"] == tmp_path
     assert captured["mode"] == "full"
+
+
+def test_main_dispatches_logs_with_backward_compatible_simple_alias(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Path | str | None] = {}
+
+    def fake_logs(*, project_root: Path | None = None, mode: str = "simple") -> int:
+        captured["project_root"] = project_root
+        captured["mode"] = mode
+        return 77
+
+    monkeypatch.setattr(unclaw_main.logs_cli, "main", fake_logs)
+
+    assert unclaw_main.main(["--project-root", str(tmp_path), "logs", "simple"]) == 77
+    assert captured["project_root"] == tmp_path
+    assert captured["mode"] == "simple"
 
 
 def test_main_dispatches_update(monkeypatch, tmp_path: Path) -> None:

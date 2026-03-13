@@ -266,6 +266,65 @@ def test_channel_preset_writes_telegram_only_to_app_config(
     assert secrets_payload["telegram"]["bot_token"] == EXAMPLE_TELEGRAM_TOKEN
 
 
+def test_onboarding_creates_backups_before_overwriting_existing_files(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    secrets_path = project_root / "config" / "secrets.yaml"
+    secrets_path.write_text(
+        yaml.safe_dump(
+            {"telegram": {"bot_token": "123456789:AAOldTelegramBotTokenValue"}},
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    original_contents = {
+        "app": (project_root / "config" / "app.yaml").read_text(encoding="utf-8"),
+        "models": (project_root / "config" / "models.yaml").read_text(
+            encoding="utf-8"
+        ),
+        "telegram": (project_root / "config" / "telegram.yaml").read_text(
+            encoding="utf-8"
+        ),
+        "secrets": secrets_path.read_text(encoding="utf-8"),
+    }
+
+    monkeypatch.setattr(
+        "unclaw.onboarding.inspect_ollama",
+        lambda timeout_seconds=1.5: OllamaStatus(
+            cli_path=None,
+            is_installed=False,
+            is_running=False,
+            model_names=(),
+            error_message="not installed",
+        ),
+    )
+
+    responses = iter(["", "", "2", "", ""])
+    result = run_onboarding(
+        settings,
+        input_func=lambda _prompt: next(responses),
+        output_func=lambda _message: None,
+    )
+
+    assert result == 0
+    assert (project_root / "config" / "app.yaml.bak").read_text(
+        encoding="utf-8"
+    ) == original_contents["app"]
+    assert (project_root / "config" / "models.yaml.bak").read_text(
+        encoding="utf-8"
+    ) == original_contents["models"]
+    assert (project_root / "config" / "telegram.yaml.bak").read_text(
+        encoding="utf-8"
+    ) == original_contents["telegram"]
+    assert (project_root / "config" / "secrets.yaml.bak").read_text(
+        encoding="utf-8"
+    ) == original_contents["secrets"]
+
+
 def test_recommended_model_profiles_match_target_defaults() -> None:
     assert recommended_model_profiles() == {
         "fast": ModelProfileDraft(

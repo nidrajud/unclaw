@@ -34,6 +34,7 @@ class CommandResult:
     lines: tuple[str, ...]
     list_tools: bool = False
     tool_call: ToolCall | None = None
+    session_id: str | None = None
 
     @property
     def should_exit(self) -> bool:
@@ -150,6 +151,7 @@ class CommandHandler:
         return self._ok(
             f"Created and switched to session {session.id}.",
             f"Title: {session.title}",
+            session_id=session.id,
         )
 
     def _handle_sessions(self, arguments: tuple[str, ...]) -> CommandResult:
@@ -174,6 +176,7 @@ class CommandHandler:
         return self._ok(
             f"Switched to session {session.id}.",
             f"Title: {session.title}",
+            session_id=session.id,
         )
 
     def _handle_summary(self, arguments: tuple[str, ...]) -> CommandResult:
@@ -346,7 +349,7 @@ class CommandHandler:
             lines.append("/exit  Leave the terminal runtime.")
             lines.append("")
             lines.append(
-                "Tip: use 'unclaw logs simple' or 'unclaw logs full' in another terminal."
+                "Tip: use 'unclaw logs' or 'unclaw logs full' in another terminal."
             )
         return self._ok(*lines)
 
@@ -398,8 +401,12 @@ class CommandHandler:
 
         return raw_value
 
-    def _ok(self, *lines: str) -> CommandResult:
-        return CommandResult(status=CommandStatus.OK, lines=tuple(lines))
+    def _ok(self, *lines: str, session_id: str | None = None) -> CommandResult:
+        return CommandResult(
+            status=CommandStatus.OK,
+            lines=tuple(lines),
+            session_id=session_id,
+        )
 
     def _error(self, *lines: str) -> CommandResult:
         return CommandResult(status=CommandStatus.ERROR, lines=tuple(lines))

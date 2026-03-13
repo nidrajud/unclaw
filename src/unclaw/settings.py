@@ -81,6 +81,16 @@ class SecuritySettings:
 
 
 @dataclass(frozen=True, slots=True)
+class OllamaProviderSettings:
+    timeout_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderSettings:
+    ollama: OllamaProviderSettings
+
+
+@dataclass(frozen=True, slots=True)
 class AppSettings:
     name: str
     display_name: str
@@ -91,6 +101,7 @@ class AppSettings:
     default_model_profile: str
     thinking: ThinkingSettings
     security: SecuritySettings
+    providers: ProviderSettings
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,6 +248,8 @@ def _build_app_settings(
     tool_security_section = _get_mapping(security_section, "tools")
     file_security_section = _get_mapping(tool_security_section, "files")
     fetch_security_section = _get_mapping(tool_security_section, "fetch")
+    providers_section = _get_mapping(payload, "providers")
+    ollama_provider_section = _get_mapping(providers_section, "ollama")
 
     directories = DirectorySettings(
         data_dir=_get_str(paths_section, "data_dir", DATA_DIRECTORY_NAME),
@@ -283,6 +296,15 @@ def _build_app_settings(
             ),
         )
     )
+    provider_settings = ProviderSettings(
+        ollama=OllamaProviderSettings(
+            timeout_seconds=_get_positive_float(
+                ollama_provider_section,
+                "timeout_seconds",
+                default=60.0,
+            )
+        )
+    )
 
     return AppSettings(
         name=_get_str(app_section, "name", APP_NAME),
@@ -294,6 +316,7 @@ def _build_app_settings(
         default_model_profile=_get_str(models_section, "default_profile"),
         thinking=thinking_settings,
         security=security_settings,
+        providers=provider_settings,
     )
 
 
@@ -391,11 +414,29 @@ def _get_bool(
     return value
 
 
-def _get_float(source: Mapping[str, Any], key: str) -> float:
-    value = source.get(key)
+def _get_float(
+    source: Mapping[str, Any],
+    key: str,
+    default: float | None = None,
+) -> float:
+    value = source.get(key, default)
     if not isinstance(value, (int, float)):
         raise ConfigurationError(f"Configuration key '{key}' must be numeric.")
     return float(value)
+
+
+def _get_positive_float(
+    source: Mapping[str, Any],
+    key: str,
+    *,
+    default: float | None = None,
+) -> float:
+    value = _get_float(source, key, default)
+    if value <= 0:
+        raise ConfigurationError(
+            f"Configuration key '{key}' must be greater than zero."
+        )
+    return value
 
 
 def _get_choice(

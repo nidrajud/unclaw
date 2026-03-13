@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable
@@ -861,6 +862,11 @@ def build_onboarding_file_payloads(
         "thinking": {
             "default_enabled": settings.app.thinking.default_enabled,
         },
+        "providers": {
+            "ollama": {
+                "timeout_seconds": settings.app.providers.ollama.timeout_seconds,
+            },
+        },
         "security": {
             "tools": {
                 "files": {
@@ -905,6 +911,15 @@ def write_onboarding_files(settings: Settings, plan: OnboardingPlan) -> None:
         settings,
         plan,
     )
+    paths_to_backup = [
+        settings.paths.app_config_path,
+        settings.paths.models_config_path,
+        settings.paths.config_dir / "telegram.yaml",
+    ]
+    if plan.telegram_bot_token is not None:
+        paths_to_backup.append(local_secrets_path(settings))
+
+    _backup_existing_files(paths_to_backup)
     _write_yaml(settings.paths.app_config_path, app_payload)
     _write_yaml(settings.paths.models_config_path, models_payload)
     _write_yaml(settings.paths.config_dir / "telegram.yaml", telegram_payload)
@@ -1372,6 +1387,19 @@ def _write_yaml(path: Path, payload: dict[str, object]) -> None:
         allow_unicode=False,
     )
     path.write_text(rendered, encoding="utf-8")
+
+
+def _backup_existing_files(paths: list[Path]) -> None:
+    for path in paths:
+        if not path.exists():
+            continue
+        backup_path = path.with_name(f"{path.name}.bak")
+        try:
+            shutil.copy2(path, backup_path)
+        except OSError as exc:
+            raise ConfigurationError(
+                f"Could not create a backup before overwriting {path}: {exc}"
+            ) from exc
 
 
 def _describe_ollama_status(ollama_status: OllamaStatus) -> str:

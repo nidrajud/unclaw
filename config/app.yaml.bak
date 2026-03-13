@@ -10,15 +10,15 @@ paths:
   files_dir: files
   database_file: app.db
 logging:
-  level: INFO
-  mode: simple
+  level: DEBUG
+  mode: full
   console_enabled: true
   file_enabled: true
   file_name: runtime.log
   include_reasoning_text: false
 channels:
   terminal_enabled: true
-  telegram_enabled: true
+  telegram_enabled: false
 models:
   default_profile: main
 thinking:

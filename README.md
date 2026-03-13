@@ -73,7 +73,7 @@ Default lineup:
 - Shared sessions and runtime behavior across channels
 
 ### Observability
-- `unclaw logs` / `unclaw logs simple`
+- `unclaw logs`
 - `unclaw logs full`
 - Live runtime tracing
 - Model, tool, route, and Telegram events

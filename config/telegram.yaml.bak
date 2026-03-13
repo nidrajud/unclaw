@@ -1,0 +1,4 @@
+bot_token_env_var: TELEGRAM_BOT_TOKEN
+polling_timeout_seconds: 30
+allowed_chat_ids:
+- 1987984174

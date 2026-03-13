@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from unclaw.update import run_update
+import unclaw.update as update
+from unclaw.update import GitCommandResult, run_update
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git is required")
 
@@ -48,6 +49,85 @@ def test_run_update_blocks_dirty_checkout_when_remote_has_updates(tmp_path: Path
     assert result == 1
     assert any("Cannot fast-forward because you have uncommitted local changes." in line for line in outputs)
     assert any("README.md" in line for line in outputs)
+
+
+def test_run_update_reports_malformed_divergence_output_cleanly(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    outputs: list[str] = []
+
+    def fake_run_git(repo_root_arg: Path, *args: str) -> GitCommandResult:
+        assert repo_root_arg == repo_root
+        command = tuple(args)
+        if command == ("rev-parse", "--show-toplevel"):
+            return GitCommandResult(returncode=0, stdout=str(repo_root), stderr="")
+        if command == ("branch", "--show-current"):
+            return GitCommandResult(returncode=0, stdout="main", stderr="")
+        if command == (
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ):
+            return GitCommandResult(returncode=0, stdout="origin/main", stderr="")
+        if command == ("fetch", "origin", "--prune"):
+            return GitCommandResult(returncode=0, stdout="", stderr="")
+        if command == ("rev-list", "--left-right", "--count", "HEAD...origin/main"):
+            return GitCommandResult(returncode=0, stdout="oops", stderr="")
+        raise AssertionError(f"Unexpected git command: {command}")
+
+    monkeypatch.setattr(update, "_run_git", fake_run_git)
+
+    result = run_update(project_root=repo_root, output_func=outputs.append)
+
+    assert result == 1
+    assert "Repository: " + str(repo_root) in outputs
+    assert "Branch: main" in outputs
+    assert "Upstream: origin/main" in outputs
+    assert (
+        "Could not determine local/remote branch divergence safely. Please update manually."
+        in outputs
+    )
+
+
+def test_run_update_reports_unsupported_upstream_state_cleanly(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    outputs: list[str] = []
+
+    def fake_run_git(repo_root_arg: Path, *args: str) -> GitCommandResult:
+        assert repo_root_arg == repo_root
+        command = tuple(args)
+        if command == ("rev-parse", "--show-toplevel"):
+            return GitCommandResult(returncode=0, stdout=str(repo_root), stderr="")
+        if command == ("branch", "--show-current"):
+            return GitCommandResult(returncode=0, stdout="main", stderr="")
+        if command == (
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ):
+            return GitCommandResult(returncode=0, stdout="origin-main", stderr="")
+        raise AssertionError(f"Unexpected git command: {command}")
+
+    monkeypatch.setattr(update, "_run_git", fake_run_git)
+
+    result = run_update(project_root=repo_root, output_func=outputs.append)
+
+    assert result == 1
+    assert "Repository: " + str(repo_root) in outputs
+    assert "Branch: main" in outputs
+    assert (
+        "This checkout is in an unsupported git state for automatic update."
+        in outputs
+    )
 
 
 def _create_git_checkout(tmp_path: Path) -> tuple[Path, Path, Path]:

@@ -3,6 +3,8 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+import yaml
+
 from unclaw.core.command_handler import CommandHandler
 from unclaw.core.runtime import run_user_turn
 from unclaw.core.session_manager import SessionManager
@@ -36,6 +38,14 @@ def test_run_user_turn_persists_reply_and_emits_runtime_events(
 
     class FakeOllamaProvider:
         provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
 
         def chat(  # type: ignore[no-untyped-def]
             self,
@@ -120,6 +130,88 @@ def test_run_user_turn_persists_reply_and_emits_runtime_events(
         runtime_log = settings.paths.log_file_path.read_text(encoding="utf-8")
         assert '"event_type": "assistant.reply.persisted"' in runtime_log
         assert '"event_type": "model.succeeded"' in runtime_log
+    finally:
+        session_manager.close()
+
+
+def test_run_user_turn_uses_configured_ollama_timeout(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    app_config_path = project_root / "config" / "app.yaml"
+    app_payload = yaml.safe_load(app_config_path.read_text(encoding="utf-8"))
+    assert isinstance(app_payload, dict)
+    providers_payload = app_payload.setdefault("providers", {})
+    assert isinstance(providers_payload, dict)
+    providers_payload["ollama"] = {"timeout_seconds": 123.0}
+    app_config_path.write_text(
+        yaml.safe_dump(app_payload, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+    )
+    captured: dict[str, object] = {}
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            captured["base_url"] = base_url
+            captured["default_timeout_seconds"] = default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+        ):
+            del profile, messages, timeout_seconds, thinking_enabled, content_callback
+            return LLMResponse(
+                provider="ollama",
+                model_name="qwen3.5:4b",
+                content="Timed reply",
+                created_at="2026-03-13T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "Check timeout wiring.",
+            session_id=session.id,
+        )
+
+        assistant_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Check timeout wiring.",
+            tracer=tracer,
+        )
+
+        assert assistant_reply == "Timed reply"
+        assert captured["default_timeout_seconds"] == 123.0
+        assert captured["base_url"] == "http://127.0.0.1:11434"
     finally:
         session_manager.close()
 

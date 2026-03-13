@@ -107,7 +107,11 @@ class Orchestrator:
 
     def _create_provider(self, provider_name: str) -> OllamaProvider:
         if provider_name == OllamaProvider.provider_name:
-            return OllamaProvider()
+            return OllamaProvider(
+                default_timeout_seconds=(
+                    self.settings.app.providers.ollama.timeout_seconds
+                )
+            )
 
         raise OrchestratorError(
             f"Provider '{provider_name}' is not supported by the minimal runtime."

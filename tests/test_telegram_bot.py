@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from unclaw.channels import telegram_bot
+from unclaw.core.command_handler import CommandResult, CommandStatus
 from unclaw.core.session_manager import SessionManager
 from unclaw.local_secrets import mask_telegram_bot_token
 from unclaw.logs.event_bus import EventBus
@@ -43,6 +44,12 @@ class FakeTracer:
 
     def trace_session_started(self, **kwargs: object) -> None:
         self.events.append(("session_started", dict(kwargs)))
+
+    def trace_tool_started(self, **kwargs: object) -> None:
+        self.events.append(("tool_started", dict(kwargs)))
+
+    def trace_tool_finished(self, **kwargs: object) -> None:
+        self.events.append(("tool_finished", dict(kwargs)))
 
 
 def test_load_telegram_config_denies_all_when_allowlist_is_empty(
@@ -480,6 +487,156 @@ def test_telegram_main_uses_locally_stored_token_without_env(
     assert captured["bot_token"] == EXAMPLE_TELEGRAM_TOKEN
 
 
+def test_telegram_tool_traces_use_explicit_chat_session_id(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path, allowed_chat_ids=[42])
+    settings = load_settings(project_root=project_root)
+    api_client = FakeApiClient()
+    tracer = FakeTracer()
+    bound_sessions: list[tuple[int, str]] = []
+    session_manager = SimpleNamespace(current_session_id="stale-session")
+
+    channel = telegram_bot.TelegramBotChannel(
+        settings=settings,
+        config=telegram_bot.TelegramConfig(
+            bot_token_env_var="TELEGRAM_BOT_TOKEN",
+            polling_timeout_seconds=30,
+            allowed_chat_ids=frozenset({42}),
+        ),
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+        tracer=tracer,
+        tool_executor=SimpleNamespace(
+            list_tools=lambda: [],
+            execute=lambda _tool_call: SimpleNamespace(
+                success=True,
+                output_text="tool output",
+                error=None,
+            ),
+        ),
+        api_client=api_client,
+        session_store=SimpleNamespace(
+            bind_chat=lambda *, chat_id, session_id: bound_sessions.append(
+                (chat_id, session_id)
+            )
+        ),
+    )
+
+    monkeypatch.setattr(
+        telegram_bot.TelegramBotChannel,
+        "_activate_chat_session",
+        lambda self, chat_id: SimpleNamespace(
+            id=f"chat-session-{chat_id}",
+            title=f"Telegram chat {chat_id}",
+        ),
+    )
+    monkeypatch.setattr(
+        telegram_bot.TelegramBotChannel,
+        "_get_command_handler",
+        lambda self, chat_id: SimpleNamespace(
+            handle=lambda _text: CommandResult(
+                status=CommandStatus.OK,
+                lines=(),
+                tool_call=SimpleNamespace(
+                    tool_name="read_text_file",
+                    arguments={"path": "README.md"},
+                ),
+            )
+        ),
+    )
+
+    channel._handle_update(
+        {
+            "message": {
+                "chat": {"id": 42},
+                "date": 100,
+                "text": "/read README.md",
+            }
+        }
+    )
+
+    tool_started = next(
+        payload for event_name, payload in tracer.events if event_name == "tool_started"
+    )
+    tool_finished = next(
+        payload for event_name, payload in tracer.events if event_name == "tool_finished"
+    )
+    assert tool_started["session_id"] == "chat-session-42"
+    assert tool_started["tool_name"] == "read_text_file"
+    assert tool_started["arguments"] == {"path": "README.md"}
+    assert tool_finished["session_id"] == "chat-session-42"
+    assert tool_finished["tool_name"] == "read_text_file"
+    assert tool_finished["success"] is True
+    assert tool_finished["output_length"] == 11
+    assert isinstance(tool_finished["tool_duration_ms"], int)
+    assert bound_sessions == [(42, "chat-session-42")]
+
+
+def test_telegram_command_result_session_id_overrides_global_current_session(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path, allowed_chat_ids=[42])
+    settings = load_settings(project_root=project_root)
+    api_client = FakeApiClient()
+    tracer = FakeTracer()
+    bound_sessions: list[tuple[int, str]] = []
+
+    channel = telegram_bot.TelegramBotChannel(
+        settings=settings,
+        config=telegram_bot.TelegramConfig(
+            bot_token_env_var="TELEGRAM_BOT_TOKEN",
+            polling_timeout_seconds=30,
+            allowed_chat_ids=frozenset({42}),
+        ),
+        session_manager=SimpleNamespace(current_session_id="global-session"),
+        memory_manager=SimpleNamespace(),
+        tracer=tracer,
+        tool_executor=SimpleNamespace(list_tools=lambda: []),
+        api_client=api_client,
+        session_store=SimpleNamespace(
+            bind_chat=lambda *, chat_id, session_id: bound_sessions.append(
+                (chat_id, session_id)
+            )
+        ),
+    )
+
+    monkeypatch.setattr(
+        telegram_bot.TelegramBotChannel,
+        "_activate_chat_session",
+        lambda self, chat_id: SimpleNamespace(
+            id=f"chat-session-{chat_id}",
+            title=f"Telegram chat {chat_id}",
+        ),
+    )
+    monkeypatch.setattr(
+        telegram_bot.TelegramBotChannel,
+        "_get_command_handler",
+        lambda self, chat_id: SimpleNamespace(
+            handle=lambda _text: CommandResult(
+                status=CommandStatus.OK,
+                lines=("Switched.",),
+                session_id="new-chat-session",
+            )
+        ),
+    )
+
+    channel._handle_update(
+        {
+            "message": {
+                "chat": {"id": 42},
+                "date": 100,
+                "text": "/use other-session",
+            }
+        }
+    )
+
+    assert bound_sessions == [(42, "new-chat-session")]
+    assert api_client.sent_messages == [(42, "Switched.")]
+
+
 def _build_channel(
     tmp_path: Path,
     *,
@@ -518,7 +675,7 @@ def _build_channel_for_settings(
         tracer=tracer,
         tool_executor=SimpleNamespace(list_tools=lambda: []),
         api_client=api_client,
-        session_store=SimpleNamespace(),
+        session_store=SimpleNamespace(bind_chat=lambda **kwargs: None),
         clock=clock,
     )
     return channel, api_client, tracer

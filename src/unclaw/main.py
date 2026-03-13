@@ -55,7 +55,6 @@ def build_parser() -> argparse.ArgumentParser:
             "  unclaw start\n"
             "  unclaw help\n"
             "  unclaw logs\n"
-            "  unclaw logs simple\n"
             "  unclaw logs full\n"
             "  unclaw onboard\n"
             "  unclaw telegram\n"
@@ -127,13 +126,21 @@ def build_parser() -> argparse.ArgumentParser:
     logs_parser = subparsers.add_parser(
         "logs",
         help="Follow local runtime logs live.",
+        description=(
+            "Show local runtime logs. `unclaw logs` opens the simple view by "
+            "default, and `unclaw logs full` shows the raw JSON stream."
+        ),
     )
     logs_parser.add_argument(
         "mode",
         nargs="?",
         choices=("simple", "full"),
         default="simple",
-        help="Choose a concise or extended local log view.",
+        metavar="mode",
+        help=(
+            "Optional log view. Leave empty for the simple view, or use "
+            "`full` for raw JSON. `simple` remains accepted as a compatibility alias."
+        ),
     )
     subparsers.add_parser("update", help="Fetch and fast-forward the local checkout.")
     return parser

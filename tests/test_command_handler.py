@@ -42,7 +42,7 @@ def test_help_lists_enriched_commands_for_cli() -> None:
     assert "/read README.md" in result.lines
     assert "/exit  Leave the terminal runtime." in result.lines
     assert (
-        "Tip: use 'unclaw logs simple' or 'unclaw logs full' in another terminal."
+        "Tip: use 'unclaw logs' or 'unclaw logs full' in another terminal."
         in result.lines
     )
 
@@ -59,7 +59,7 @@ def test_help_omits_exit_for_telegram() -> None:
     assert result.status is CommandStatus.OK
     assert "/exit  Leave the terminal runtime." not in result.lines
     assert (
-        "Tip: use 'unclaw logs simple' or 'unclaw logs full' in another terminal."
+        "Tip: use 'unclaw logs' or 'unclaw logs full' in another terminal."
         not in result.lines
     )
 

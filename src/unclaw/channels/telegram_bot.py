@@ -357,6 +357,7 @@ class TelegramBotChannel:
             self._handle_command(
                 chat_id=chat_id,
                 text=normalized_text,
+                session_id=active_session.id,
                 command_handler=command_handler,
             )
             return
@@ -410,6 +411,7 @@ class TelegramBotChannel:
         *,
         chat_id: int,
         text: str,
+        session_id: str,
         command_handler: CommandHandler,
     ) -> None:
         normalized_command = _normalize_telegram_command(text)
@@ -417,21 +419,24 @@ class TelegramBotChannel:
             normalized_command = "/help"
 
         result = command_handler.handle(normalized_command)
-        self._persist_chat_binding(chat_id)
+        bound_session_id = self._resolve_command_session_id(
+            fallback_session_id=session_id,
+            result=result,
+        )
+        self._persist_chat_binding(chat_id, session_id=bound_session_id)
 
         if result.list_tools:
             reply_text = _format_tool_list(self.tool_executor.list_tools())
         elif result.tool_call is not None:
-            session_id = self.session_manager.current_session_id
             self.tracer.trace_tool_started(
-                session_id=session_id,
+                session_id=bound_session_id,
                 tool_name=result.tool_call.tool_name,
                 arguments=result.tool_call.arguments,
             )
             tool_started_at = time.perf_counter()
             tool_result = self.tool_executor.execute(result.tool_call)
             self.tracer.trace_tool_finished(
-                session_id=session_id,
+                session_id=bound_session_id,
                 tool_name=result.tool_call.tool_name,
                 success=tool_result.success,
                 output_length=len(tool_result.output_text),
@@ -471,14 +476,31 @@ class TelegramBotChannel:
         except UnclawError as exc:
             LOGGER.warning("Could not refresh session summary for %s: %s", session_id, exc)
 
-        self._persist_chat_binding(chat_id)
+        self._persist_chat_binding(chat_id, session_id=session_id)
         self._send_reply(chat_id=chat_id, text=assistant_reply)
 
-    def _persist_chat_binding(self, chat_id: int) -> None:
-        current_session_id = self.session_manager.current_session_id
-        if current_session_id is None:
+    def _persist_chat_binding(self, chat_id: int, *, session_id: str) -> None:
+        if not session_id.strip():
             return
-        self.session_store.bind_chat(chat_id=chat_id, session_id=current_session_id)
+        self.session_store.bind_chat(chat_id=chat_id, session_id=session_id)
+
+    def _resolve_command_session_id(
+        self,
+        *,
+        fallback_session_id: str,
+        result: CommandResult,
+    ) -> str:
+        if isinstance(result.session_id, str) and result.session_id.strip():
+            return result.session_id
+
+        if fallback_session_id.strip():
+            return fallback_session_id
+
+        current_session_id = getattr(self.session_manager, "current_session_id", None)
+        if isinstance(current_session_id, str) and current_session_id.strip():
+            return current_session_id
+
+        return fallback_session_id
 
     def _is_rate_limited(
         self,
