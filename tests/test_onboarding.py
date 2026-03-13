@@ -18,6 +18,8 @@ from unclaw.onboarding import (
 from unclaw.settings import load_settings
 from unclaw.startup import OllamaStatus
 
+EXAMPLE_TELEGRAM_TOKEN = "123456789:AAExampleTelegramBotTokenValue"
+
 
 def test_recommended_onboarding_writes_terminal_and_telegram_preset(
     monkeypatch,
@@ -37,7 +39,7 @@ def test_recommended_onboarding_writes_terminal_and_telegram_preset(
         ),
     )
 
-    responses = iter(["", "", "2", "", ""])
+    responses = iter(["", "", "2", EXAMPLE_TELEGRAM_TOKEN, ""])
     outputs: list[str] = []
 
     result = run_onboarding(
@@ -51,6 +53,7 @@ def test_recommended_onboarding_writes_terminal_and_telegram_preset(
     app_payload = _read_yaml(project_root / "config" / "app.yaml")
     models_payload = _read_yaml(project_root / "config" / "models.yaml")
     telegram_payload = _read_yaml(project_root / "config" / "telegram.yaml")
+    secrets_payload = _read_yaml(project_root / "config" / "secrets.yaml")
 
     assert app_payload["logging"]["mode"] == "simple"
     assert app_payload["channels"] == {
@@ -63,7 +66,9 @@ def test_recommended_onboarding_writes_terminal_and_telegram_preset(
     assert models_payload["profiles"]["deep"]["model_name"] == "qwen3.5:9b"
     assert models_payload["profiles"]["codex"]["model_name"] == "qwen2.5-coder:7b"
     assert telegram_payload["bot_token_env_var"] == "TELEGRAM_BOT_TOKEN"
+    assert secrets_payload["telegram"]["bot_token"] == EXAMPLE_TELEGRAM_TOKEN
     assert any("Ollama is not installed yet." in line for line in outputs)
+    assert any("stored locally" in line for line in outputs)
     assert any("unclaw telegram" in line for line in outputs)
 
 
@@ -89,7 +94,7 @@ def test_advanced_onboarding_can_choose_installed_and_custom_models(
         [
             "2",
             "",
-            "",
+            "1",
             "3",
             "2",
             "",
@@ -185,7 +190,7 @@ def test_channel_preset_writes_telegram_only_to_app_config(
         ),
     )
 
-    responses = iter(["", "", "3", "", ""])
+    responses = iter(["", "", "3", EXAMPLE_TELEGRAM_TOKEN, ""])
 
     result = run_onboarding(
         settings,
@@ -196,10 +201,12 @@ def test_channel_preset_writes_telegram_only_to_app_config(
     assert result == 0
 
     app_payload = _read_yaml(project_root / "config" / "app.yaml")
+    secrets_payload = _read_yaml(project_root / "config" / "secrets.yaml")
     assert app_payload["channels"] == {
         "terminal_enabled": False,
         "telegram_enabled": True,
     }
+    assert secrets_payload["telegram"]["bot_token"] == EXAMPLE_TELEGRAM_TOKEN
 
 
 def test_recommended_model_profiles_match_target_defaults() -> None:

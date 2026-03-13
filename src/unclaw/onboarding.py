@@ -13,15 +13,22 @@ import yaml
 
 from unclaw.bootstrap import bootstrap
 from unclaw.channels.telegram_bot import (
-    DEFAULT_TELEGRAM_TOKEN_ENV_VAR,
     TelegramConfig,
     load_telegram_config,
-    validate_telegram_token_env_var_name,
 )
 from unclaw.errors import ConfigurationError, UnclawError
+from unclaw.local_secrets import (
+    DEFAULT_TELEGRAM_TOKEN_ENV_VAR,
+    LocalSecrets,
+    load_local_secrets,
+    local_secrets_path,
+    validate_telegram_bot_token,
+    write_local_secrets,
+)
 from unclaw.settings import ModelProfile, Settings
 from unclaw.startup import (
     OllamaStatus,
+    build_banner,
     find_missing_model_profiles,
     inspect_ollama,
     ollama_install_guidance,
@@ -46,24 +53,6 @@ _PROFILE_DESCRIPTIONS = {
     "codex": "Code-heavy work such as repositories, scripts, and fixes.",
 }
 
-_ONBOARDING_WORDMARK = (
-    "██╗   ██╗███╗   ██╗ ██████╗██╗      █████╗ ██╗    ██╗",
-    "██║   ██║████╗  ██║██╔════╝██║     ██╔══██╗██║    ██║",
-    "██║   ██║██╔██╗ ██║██║     ██║     ███████║██║ █╗ ██║",
-    "██║   ██║██║╚██╗██║██║     ██║     ██╔══██║██║███╗██║",
-    "╚██████╔╝██║ ╚████║╚██████╗███████╗██║  ██║╚███╔███╔╝",
-    " ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝ ",
-)
-_ONBOARDING_WORDMARK_ASCII = (
-    " _   _ _   _  ____ _        ___        __",
-    "| | | | \\ | |/ ___| |      / _ \\ \\      / /",
-    "| | | |  \\| | |   | |     | | | |\\ \\ /\\ / / ",
-    "| |_| | |\\  | |___| |___  | |_| | \\ V  V /  ",
-    " \\___/|_| \\_|\\____|_____|  \\___/   \\_/\\_/   ",
-)
-_ONBOARDING_TAGLINE = "🦐 Local-first AI, no cloud claws 🦐"
-_ONBOARDING_TAGLINE_ASCII = "Local-first AI, no cloud claws"
-
 
 @dataclass(frozen=True, slots=True)
 class ModelProfileDraft:
@@ -86,6 +75,7 @@ class OnboardingPlan:
     enabled_channels: tuple[str, ...]
     default_profile: str
     model_profiles: dict[str, ModelProfileDraft]
+    telegram_bot_token: str | None
     telegram_bot_token_env_var: str
     telegram_allowed_chat_ids: tuple[int, ...]
     telegram_polling_timeout_seconds: int
@@ -491,12 +481,13 @@ _CHANNEL_PRESET_OPTIONS = (
 if questionary is not None:
     _QUESTIONARY_STYLE = questionary.Style(
         [
-            ("qmark", "fg:#7fd1ff bold"),
+            ("qmark", "fg:#f5b9a0 bold"),
             ("question", "bold"),
-            ("answer", "fg:#7be0a1 bold"),
-            ("pointer", "fg:#7fd1ff bold"),
-            ("highlighted", "fg:#101418 bg:#7fd1ff bold"),
-            ("selected", "fg:#0f1a12 bg:#7be0a1 bold"),
+            ("answer", "fg:#f5b9a0 bold"),
+            ("pointer", "fg:#1d1411 bg:#f5b9a0 bold"),
+            ("highlighted", "fg:#1d1411 bg:#f5b9a0 bold"),
+            ("selected", "fg:#1d1411 bg:#f5b9a0 bold"),
+            ("text", "fg:#d7dde3"),
             ("separator", "fg:#7a8792"),
             ("instruction", "fg:#7a8792 italic"),
             ("disabled", "fg:#58606a italic"),
@@ -531,16 +522,19 @@ def run_onboarding(
 
     prompt_ui = _build_prompt_ui(input_func=input_func, output_func=output_func)
     telegram_config, telegram_warning = _load_existing_telegram_config(settings)
+    local_secrets, local_secrets_warning = _load_existing_local_secrets(settings)
     ollama_status = inspect_ollama()
 
     output_func(
         _build_onboarding_banner(settings=settings, ollama_status=ollama_status)
     )
-    output_func("This setup updates your local config files in place.")
+    output_func("This setup updates your local project config in place.")
     if prompt_ui.interactive:
         output_func("Use arrow keys to move and Enter to confirm each choice.")
     if telegram_warning is not None:
         output_func(telegram_warning)
+    if local_secrets_warning is not None:
+        output_func(local_secrets_warning)
 
     prompt_ui.section(
         "Setup style",
@@ -593,10 +587,11 @@ def run_onboarding(
             ollama_status=ollama_status,
         )
 
+    telegram_bot_token = local_secrets.telegram_bot_token
     telegram_bot_token_env_var = telegram_config.bot_token_env_var
     if "telegram" in enabled_channels:
-        telegram_bot_token_env_var = _prompt_telegram_token_env_var_name(
-            telegram_config=telegram_config,
+        telegram_bot_token = _prompt_telegram_bot_token(
+            existing_token=local_secrets.telegram_bot_token,
             prompt_ui=prompt_ui,
         )
 
@@ -607,6 +602,7 @@ def run_onboarding(
         enabled_channels=enabled_channels,
         default_profile="main",
         model_profiles=model_profiles,
+        telegram_bot_token=telegram_bot_token,
         telegram_bot_token_env_var=telegram_bot_token_env_var,
         telegram_allowed_chat_ids=tuple(sorted(telegram_config.allowed_chat_ids)),
         telegram_polling_timeout_seconds=telegram_config.polling_timeout_seconds,
@@ -629,6 +625,8 @@ def run_onboarding(
     output_func(f"- {configured_settings.paths.app_config_path}")
     output_func(f"- {configured_settings.paths.models_config_path}")
     output_func(f"- {configured_settings.paths.config_dir / 'telegram.yaml'}")
+    if plan.telegram_bot_token is not None:
+        output_func(f"- {local_secrets_path(configured_settings)}")
 
     ollama_status = _post_configure_ollama(
         configured_settings,
@@ -640,11 +638,12 @@ def run_onboarding(
     output_func("Next steps:")
     output_func("- Start the terminal runtime with `unclaw start`.")
     if "telegram" in enabled_channels:
+        output_func("- Start Telegram with `unclaw telegram`.")
         output_func(
-            f"- Export `{plan.telegram_bot_token_env_var}` and run `unclaw telegram`."
+            f"- Your bot token is stored locally in `{local_secrets_path(configured_settings)}`."
         )
         output_func(
-            f"- Example: export {plan.telegram_bot_token_env_var}=<your bot token>"
+            f"- Advanced fallback: export {plan.telegram_bot_token_env_var}=<your bot token>"
         )
     else:
         output_func("- Enable Telegram later by rerunning `unclaw onboard`.")
@@ -746,6 +745,10 @@ def write_onboarding_files(settings: Settings, plan: OnboardingPlan) -> None:
     _write_yaml(settings.paths.app_config_path, app_payload)
     _write_yaml(settings.paths.models_config_path, models_payload)
     _write_yaml(settings.paths.config_dir / "telegram.yaml", telegram_payload)
+    write_local_secrets(
+        settings,
+        LocalSecrets(telegram_bot_token=plan.telegram_bot_token),
+    )
 
 
 def _post_configure_ollama(
@@ -839,8 +842,8 @@ def _load_existing_telegram_config(
     except UnclawError as exc:
         warning = (
             "Telegram config note: "
-            f"{exc} Using {DEFAULT_TELEGRAM_TOKEN_ENV_VAR} until you choose a valid "
-            "environment variable name."
+            f"{exc} Using {DEFAULT_TELEGRAM_TOKEN_ENV_VAR} as the advanced fallback "
+            "environment variable."
         )
         return (
             TelegramConfig(
@@ -850,6 +853,19 @@ def _load_existing_telegram_config(
             ),
             warning,
         )
+
+
+def _load_existing_local_secrets(
+    settings: Settings,
+) -> tuple[LocalSecrets, str | None]:
+    try:
+        return load_local_secrets(settings), None
+    except UnclawError as exc:
+        warning = (
+            "Local secrets note: "
+            f"{exc} Unclaw will ask you to rewrite the Telegram token for this project."
+        )
+        return LocalSecrets(), warning
 
 
 def _build_prompt_ui(
@@ -888,8 +904,8 @@ def _prompt_channel_preset(
         options=_CHANNEL_PRESET_OPTIONS,
         default=default_preset,
         help_text=(
-            "Pick one explicit preset. Telegram still requires a bot token "
-            "environment variable."
+            "Pick one explicit preset. If Telegram is enabled, Unclaw will ask for "
+            "the bot token and store it locally for this project."
         ),
     )
 
@@ -1091,29 +1107,42 @@ def _prompt_installed_model_name(
     )
 
 
-def _prompt_telegram_token_env_var_name(
+def _prompt_telegram_bot_token(
     *,
-    telegram_config: TelegramConfig,
+    existing_token: str | None,
     prompt_ui: PromptUI,
 ) -> str:
     prompt_ui.section(
-        "Telegram token",
-        "This step asks for the environment variable name, not the bot token value itself.",
+        "Telegram bot",
+        (
+            "Paste your Telegram bot token. Unclaw stores it locally in "
+            "config/secrets.yaml for this project."
+        ),
     )
-    prompt_ui.info("Example env var name: TELEGRAM_BOT_TOKEN")
+    prompt_ui.info("Paste your Telegram bot token")
+    prompt_ui.info("Example format: 123456789:AA...")
     prompt_ui.info(
-        "Later you will export it like: export TELEGRAM_BOT_TOKEN=<your bot token>"
+        "Advanced fallback: `unclaw telegram` can still read "
+        f"`{DEFAULT_TELEGRAM_TOKEN_ENV_VAR}` from the environment."
     )
 
-    default_name = telegram_config.bot_token_env_var or DEFAULT_TELEGRAM_TOKEN_ENV_VAR
+    if existing_token is not None:
+        keep_existing = prompt_ui.confirm(
+            "Keep the Telegram bot token already stored locally for this project?",
+            default=True,
+            help_text="Choose No if you want to replace it with a new token.",
+        )
+        if keep_existing:
+            return existing_token
 
     return prompt_ui.text(
-        "Environment variable name for the Telegram bot token",
-        default=default_name,
+        "Paste your Telegram bot token",
+        default="",
         help_text=(
-            "Use a name such as TELEGRAM_BOT_TOKEN. Do not paste the token value here."
+            "Paste the full token from BotFather. It will be written to "
+            "`config/secrets.yaml` for this project."
         ),
-        validator=_validate_telegram_env_var_name,
+        validator=_validate_telegram_bot_token,
     )
 
 
@@ -1124,9 +1153,9 @@ def _validate_model_name(value: str) -> str | None:
     return None
 
 
-def _validate_telegram_env_var_name(value: str) -> str | None:
+def _validate_telegram_bot_token(value: str) -> str | None:
     try:
-        validate_telegram_token_env_var_name(value)
+        validate_telegram_bot_token(value)
     except ConfigurationError as exc:
         return str(exc)
     return None
@@ -1156,7 +1185,10 @@ def _print_plan_summary(plan: OnboardingPlan, *, output_func: OutputFunc) -> Non
     for profile_name in _PROFILE_ORDER:
         output_func(f"- {profile_name}: {plan.model_profiles[profile_name].model_name}")
     if "telegram" in plan.enabled_channels:
-        output_func(f"- Telegram token env var: {plan.telegram_bot_token_env_var}")
+        output_func("- Telegram token: stored locally in config/secrets.yaml")
+        output_func(
+            f"- Telegram env fallback: {plan.telegram_bot_token_env_var}"
+        )
 
 
 def _write_yaml(path: Path, payload: dict[str, object]) -> None:
@@ -1177,64 +1209,21 @@ def _describe_ollama_status(ollama_status: OllamaStatus) -> str:
 
 
 def _build_onboarding_banner(*, settings: Settings, ollama_status: OllamaStatus) -> str:
-    wordmark, tagline = _render_onboarding_wordmark()
-    rows = (
-        ("project", str(settings.paths.project_root)),
-        ("config", str(settings.paths.config_dir)),
-        ("ollama", _describe_ollama_status(ollama_status)),
+    return build_banner(
+        title="Onboarding",
+        subtitle="Guided local setup for channels, models, and startup defaults.",
+        rows=(
+            ("project", str(settings.paths.project_root)),
+            ("config", str(settings.paths.config_dir)),
+            ("ollama", _describe_ollama_status(ollama_status)),
+        ),
     )
-    width = max(
-        76,
-        len(tagline),
-        *(len(line) for line in wordmark),
-        *(len(_format_banner_row(label, value)) for label, value in rows),
-    )
-
-    lines = [_banner_border("=", width)]
-    lines.extend(_banner_line(line, width) for line in wordmark)
-    lines.append(_banner_line("", width))
-    lines.append(_banner_line(tagline.center(width), width))
-    lines.append(_banner_border("-", width))
-    lines.extend(
-        _banner_line(_format_banner_row(label, value), width)
-        for label, value in rows
-    )
-    lines.append(_banner_border("=", width))
-    return "\n".join(lines)
 
 
 def _unique_model_names(missing_profiles: tuple[tuple[str, str], ...]) -> tuple[str, ...]:
     return tuple(
         dict.fromkeys(model_name for _profile_name, model_name in missing_profiles)
     )
-
-
-def _render_onboarding_wordmark() -> tuple[tuple[str, ...], str]:
-    if _stdout_supports_text((*_ONBOARDING_WORDMARK, _ONBOARDING_TAGLINE)):
-        return _ONBOARDING_WORDMARK, _ONBOARDING_TAGLINE
-    return _ONBOARDING_WORDMARK_ASCII, _ONBOARDING_TAGLINE_ASCII
-
-
-def _format_banner_row(label: str, value: str) -> str:
-    return f"{label.upper():<10} {value}"
-
-
-def _banner_border(fill: str, width: int) -> str:
-    return f"+{fill * (width + 2)}+"
-
-
-def _banner_line(content: str, width: int) -> str:
-    return f"| {content:<{width}} |"
-
-
-def _stdout_supports_text(lines: tuple[str, ...]) -> bool:
-    encoding = sys.stdout.encoding or "utf-8"
-    try:
-        for line in lines:
-            line.encode(encoding)
-    except UnicodeEncodeError:
-        return False
-    return True
 
 
 def _resolve_select_default(*, options: tuple[MenuOption, ...], default: str) -> str:

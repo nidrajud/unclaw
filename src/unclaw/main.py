@@ -10,6 +10,7 @@ from unclaw import __version__
 from unclaw.channels import cli as cli_channel
 from unclaw.channels import telegram_bot
 from unclaw.onboarding import main as onboarding_main
+from unclaw.update import main as update_main
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -26,6 +27,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return telegram_bot.main(project_root=project_root)
     if command_name == "onboard":
         return onboarding_main(project_root=project_root)
+    if command_name == "update":
+        return update_main(project_root=project_root)
 
     parser.error(f"Unsupported command: {command_name}")
     return 2
@@ -54,6 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("start", help="Start the terminal runtime.")
     subparsers.add_parser("telegram", help="Start the Telegram channel.")
     subparsers.add_parser("onboard", help="Run interactive onboarding.")
+    subparsers.add_parser("update", help="Fetch and fast-forward the local checkout.")
     return parser
 
 

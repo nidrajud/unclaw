@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import re
 import sqlite3
 import sys
 import time
@@ -24,6 +22,10 @@ from unclaw.core.runtime import run_user_turn
 from unclaw.core.session_manager import SessionManager
 from unclaw.errors import ConfigurationError, UnclawError
 from unclaw.llm.base import utc_now_iso
+from unclaw.local_secrets import (
+    resolve_telegram_bot_token,
+    validate_telegram_token_env_var_name,
+)
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
 from unclaw.memory import MemoryManager
@@ -38,10 +40,6 @@ _TELEGRAM_CONFIG_FILE_NAME = "telegram.yaml"
 _TELEGRAM_API_BASE_URL = "https://api.telegram.org"
 _POLL_RETRY_DELAY_SECONDS = 3.0
 _MESSAGE_LIMIT = 4000
-DEFAULT_TELEGRAM_TOKEN_ENV_VAR = "TELEGRAM_BOT_TOKEN"
-
-_ENV_VAR_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_TELEGRAM_BOT_TOKEN_PATTERN = re.compile(r"^\d{6,}:[A-Za-z0-9_-]{20,}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,35 +58,6 @@ class TelegramConfig:
 
 class TelegramApiError(UnclawError):
     """Raised when the Telegram Bot API request fails."""
-
-
-def is_probable_telegram_bot_token(value: str) -> bool:
-    """Heuristically detect pasted Telegram bot tokens."""
-
-    return bool(_TELEGRAM_BOT_TOKEN_PATTERN.fullmatch(value.strip()))
-
-
-def validate_telegram_token_env_var_name(value: str) -> str:
-    """Validate the config field that stores the Telegram token env var name."""
-
-    normalized = value.strip()
-    if not normalized:
-        raise ConfigurationError(
-            "Telegram setting 'bot_token_env_var' must be a non-empty string."
-        )
-    if is_probable_telegram_bot_token(normalized):
-        raise ConfigurationError(
-            "Telegram setting 'bot_token_env_var' must contain an environment "
-            "variable name such as TELEGRAM_BOT_TOKEN, not a pasted bot token. "
-            "Store the real token in that environment variable before running "
-            "`unclaw telegram`."
-        )
-    if not _ENV_VAR_NAME_PATTERN.fullmatch(normalized):
-        raise ConfigurationError(
-            "Telegram setting 'bot_token_env_var' must look like an environment "
-            "variable name such as TELEGRAM_BOT_TOKEN."
-        )
-    return normalized
 
 
 @dataclass(slots=True)
@@ -487,11 +456,16 @@ def main(project_root: Path | None = None) -> int:
         if startup_report.has_errors:
             return 1
 
-        bot_token = os.environ.get(telegram_config.bot_token_env_var)
-        if bot_token is None or not bot_token.strip():
+        resolved_bot_token = resolve_telegram_bot_token(
+            settings,
+            bot_token_env_var=telegram_config.bot_token_env_var,
+        )
+        if resolved_bot_token is None:
             raise ConfigurationError(
                 "Telegram bot token is missing. "
-                f"Set the {telegram_config.bot_token_env_var} environment variable."
+                "Run `unclaw onboard` and paste it into the local project secrets "
+                "file, or use the advanced fallback "
+                f"{telegram_config.bot_token_env_var} environment variable."
             )
 
         session_manager = SessionManager.from_settings(settings)
@@ -502,7 +476,7 @@ def main(project_root: Path | None = None) -> int:
             event_repository=session_manager.event_repository,
         )
         tool_executor = ToolExecutor.with_default_tools()
-        api_client = TelegramApiClient(bot_token=bot_token.strip())
+        api_client = TelegramApiClient(bot_token=resolved_bot_token.value)
         session_store = TelegramChatSessionStore(session_manager.connection)
         session_store.initialize()
 

@@ -8,15 +8,26 @@ import shutil
 import subprocess
 import sys
 import textwrap
+import unicodedata
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from time import sleep
 
+from unclaw.errors import ConfigurationError
 from unclaw.llm.base import LLMProviderError
+from unclaw.local_secrets import local_secrets_path, resolve_telegram_bot_token
 from unclaw.llm.ollama_provider import OllamaProvider
 from unclaw.settings import Settings
 
+_UNICODE_WORDMARK = (
+    "██╗   ██╗███╗   ██╗ ██████╗██╗      █████╗ ██╗    ██╗",
+    "██║   ██║████╗  ██║██╔════╝██║     ██╔══██╗██║    ██║",
+    "██║   ██║██╔██╗ ██║██║     ██║     ███████║██║ █╗ ██║",
+    "██║   ██║██║╚██╗██║██║     ██║     ██╔══██║██║███╗██║",
+    "╚██████╔╝██║ ╚████║╚██████╗███████╗██║  ██║╚███╔███╔╝",
+    " ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝ ",
+)
 _ASCII_WORDMARK = (
     " _   _            _                 ",
     "| | | |_ __   ___| | __ ___      __",
@@ -24,6 +35,8 @@ _ASCII_WORDMARK = (
     "| |_| | | | | (__| | (_| |\\ V  V / ",
     " \\___/|_| |_|\\___|_|\\__,_| \\_/\\_/  ",
 )
+_BRAND_TAGLINE = "🦐 Local-first AI, no cloud claws 🦐"
+_BRAND_TAGLINE_ASCII = "Local-first AI, no cloud claws"
 
 
 class CheckStatus(StrEnum):
@@ -204,7 +217,12 @@ def build_startup_report(
         )
 
     if telegram_token_env_var is not None:
-        checks.append(_build_telegram_token_check(telegram_token_env_var))
+        checks.append(
+            _build_telegram_token_check(
+                settings,
+                bot_token_env_var=telegram_token_env_var,
+            )
+        )
 
     return StartupReport(channel_name=channel_name, checks=tuple(checks))
 
@@ -241,19 +259,35 @@ def build_banner(
     """Build a polished ASCII banner for terminal startup flows."""
 
     use_color = _should_use_color() if use_color is None else use_color
+    wordmark, tagline = _render_branding()
     row_lines = tuple(_format_row(label, value) for label, value in rows)
     width = max(
         72,
-        *(len(line) for line in _ASCII_WORDMARK),
-        len(title),
-        len(subtitle),
-        *(len(line) for line in row_lines),
+        *(_visible_length(line) for line in wordmark),
+        _visible_length(tagline),
+        _visible_length(title),
+        _visible_length(subtitle),
+        *(_visible_length(line) for line in row_lines),
     )
 
     lines = [_frame_border("=", width)]
-    lines.extend(_frame_line(_style_art(line, use_color), width) for line in _ASCII_WORDMARK)
-    lines.append(_frame_line(_style_text(title, "cyan", use_color, bold=True), width))
-    lines.append(_frame_line(_style_text(subtitle, "dim", use_color), width))
+    lines.extend(
+        _frame_line(_style_art(line, use_color), width, align="center")
+        for line in wordmark
+    )
+    lines.append(
+        _frame_line(
+            _style_text(title, "shrimp", use_color, bold=True),
+            width,
+            align="center",
+        )
+    )
+    lines.append(
+        _frame_line(_style_text(tagline, "dim", use_color), width, align="center")
+    )
+    lines.append(
+        _frame_line(_style_text(subtitle, "dim", use_color), width, align="center")
+    )
     lines.append(_frame_border("-", width))
     lines.extend(_frame_line(line, width) for line in row_lines)
     lines.append(_frame_border("=", width))
@@ -421,20 +455,46 @@ def _build_optional_model_checks(
     )
 
 
-def _build_telegram_token_check(bot_token_env_var: str) -> StartupCheck:
-    token = os.environ.get(bot_token_env_var)
-    if token is not None and token.strip():
+def _build_telegram_token_check(
+    settings: Settings,
+    *,
+    bot_token_env_var: str,
+) -> StartupCheck:
+    try:
+        resolved_token = resolve_telegram_bot_token(
+            settings,
+            bot_token_env_var=bot_token_env_var,
+        )
+    except ConfigurationError as exc:
+        return StartupCheck(
+            status=CheckStatus.ERROR,
+            label="Telegram token",
+            detail=str(exc),
+            guidance=(
+                "Run `unclaw onboard` and paste your Telegram bot token again, or "
+                f"use the advanced fallback {bot_token_env_var} environment variable."
+            ),
+        )
+
+    if resolved_token is not None:
         return StartupCheck(
             status=CheckStatus.OK,
             label="Telegram token",
-            detail=f"{bot_token_env_var} is set.",
+            detail=f"Available from {resolved_token.source_label}.",
         )
 
+    secrets_path = local_secrets_path(settings)
     return StartupCheck(
         status=CheckStatus.ERROR,
         label="Telegram token",
-        detail=f"{bot_token_env_var} is not set.",
-        guidance=f"Export {bot_token_env_var}=<your bot token> before `unclaw telegram`.",
+        detail=(
+            f"No Telegram bot token was found in {secrets_path} or "
+            f"{bot_token_env_var}."
+        ),
+        guidance=(
+            "Run `unclaw onboard` and paste your bot token. Advanced fallback: "
+            f"export {bot_token_env_var}=<your bot token>."
+        ),
     )
 
 
@@ -446,9 +506,8 @@ def _frame_border(fill: str, width: int) -> str:
     return f"+{fill * (width + 2)}+"
 
 
-def _frame_line(content: str, width: int) -> str:
-    padding = max(0, width - _visible_length(content))
-    return f"| {content}{' ' * padding} |"
+def _frame_line(content: str, width: int, *, align: str = "left") -> str:
+    return f"| {_pad_content(content, width, align=align)} |"
 
 
 def _status_badge(status: CheckStatus, use_color: bool) -> str:
@@ -468,7 +527,7 @@ def _status_badge(status: CheckStatus, use_color: bool) -> str:
 
 
 def _style_art(text: str, use_color: bool) -> str:
-    return _style_text(text, "blue", use_color, bold=True)
+    return _style_text(text, "shrimp", use_color, bold=True)
 
 
 def _style_text(text: str, color: str, use_color: bool, *, bold: bool = False) -> str:
@@ -482,6 +541,7 @@ def _style_text(text: str, color: str, use_color: bool, *, bold: bool = False) -
         "yellow": "33",
         "red": "31",
         "dim": "2",
+        "shrimp": "38;2;245;185;160",
     }[color]
     if color == "dim":
         codes = [color_code]
@@ -505,8 +565,45 @@ def _visible_length(text: str) -> int:
             if character == "m":
                 in_escape = False
             continue
-        length += 1
+        length += _character_width(character)
     return length
+
+
+def _character_width(character: str) -> int:
+    if not character:
+        return 0
+    if unicodedata.category(character) in {"Cc", "Cf"}:
+        return 0
+    if unicodedata.combining(character):
+        return 0
+    if unicodedata.east_asian_width(character) in {"F", "W"}:
+        return 2
+    return 1
+
+
+def _pad_content(content: str, width: int, *, align: str) -> str:
+    padding = max(0, width - _visible_length(content))
+    if align == "center":
+        left_padding = padding // 2
+        right_padding = padding - left_padding
+        return f"{' ' * left_padding}{content}{' ' * right_padding}"
+    return f"{content}{' ' * padding}"
+
+
+def _render_branding() -> tuple[tuple[str, ...], str]:
+    if _stdout_supports_text((*_UNICODE_WORDMARK, _BRAND_TAGLINE)):
+        return _UNICODE_WORDMARK, _BRAND_TAGLINE
+    return _ASCII_WORDMARK, _BRAND_TAGLINE_ASCII
+
+
+def _stdout_supports_text(lines: tuple[str, ...]) -> bool:
+    encoding = sys.stdout.encoding or "utf-8"
+    try:
+        for line in lines:
+            line.encode(encoding)
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _should_use_color() -> bool:

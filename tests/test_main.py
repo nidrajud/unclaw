@@ -42,3 +42,16 @@ def test_main_dispatches_onboarding(monkeypatch, tmp_path: Path) -> None:
 
     assert unclaw_main.main(["--project-root", str(tmp_path), "onboard"]) == 33
     assert captured["project_root"] == tmp_path
+
+
+def test_main_dispatches_update(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, Path | None] = {}
+
+    def fake_update(*, project_root: Path | None = None) -> int:
+        captured["project_root"] = project_root
+        return 44
+
+    monkeypatch.setattr(unclaw_main, "update_main", fake_update)
+
+    assert unclaw_main.main(["--project-root", str(tmp_path), "update"]) == 44
+    assert captured["project_root"] == tmp_path
