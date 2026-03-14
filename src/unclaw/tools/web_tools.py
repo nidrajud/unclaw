@@ -50,7 +50,6 @@ _ARTICLE_PATH_CUES = frozenset(
         "entry",
         "feature",
         "features",
-        "live",
         "post",
         "posts",
         "recap",
@@ -60,6 +59,25 @@ _ARTICLE_PATH_CUES = frozenset(
         "stories",
         "update",
         "updates",
+    }
+)
+_LIVE_STREAMING_PATH_CUES = frozenset(
+    {
+        "direct",
+        "directs",
+        "emission",
+        "emissions",
+        "en-direct",
+        "live",
+        "player",
+        "programme",
+        "programmes",
+        "regarder",
+        "replay",
+        "stream",
+        "streaming",
+        "tv",
+        "watch",
     }
 )
 _HUB_PATH_CUES = frozenset(
@@ -132,12 +150,17 @@ _NOISE_SIGNAL_PHRASES = frozenset(
         "acceder aux notifications",
         "account settings",
         "all rights reserved",
+        "already a subscriber",
+        "article reserve",
         "conditions generales",
         "consentement",
+        "contenu reserve",
         "cookie policy",
         "cookie preferences",
         "creer un compte",
         "data protection",
+        "deja abonne",
+        "deja inscrit",
         "donnees personnelles",
         "en poursuivant",
         "en savoir plus et gerer",
@@ -146,26 +169,33 @@ _NOISE_SIGNAL_PHRASES = frozenset(
         "inscription gratuite",
         "log in to",
         "manage preferences",
+        "manage your subscription",
         "mon compte",
         "newsletter signup",
         "nos partenaires",
         "notre politique",
         "nous utilisons des cookies",
+        "offre numerique",
+        "offre speciale",
         "parametres de confidentialite",
         "partenaires data",
         "politique de confidentialite",
         "privacy policy",
         "privacy settings",
+        "profitez de",
         "se connecter",
         "sign in to",
         "sign up for",
         "subscribe to",
+        "subscription required",
         "terms of service",
         "tous droits reserves",
         "use of cookies",
         "utilisation de cookies",
+        "votre abonnement",
         "votre consentement",
         "your privacy",
+        "your subscription",
     }
 )
 _QUERY_STOPWORDS = frozenset(
@@ -449,7 +479,7 @@ def search_web(call: ToolCall) -> ToolResult:
         timeout_seconds=timeout_seconds,
         budget=_RetrievalBudget(max_initial_results=max_results),
     )
-    summary_points = _build_search_summary_points(outcome.evidence_items)
+    summary_points = _build_search_summary_points(outcome.evidence_items, query=search_query)
     output_text = _format_search_results(
         query=query,
         outcome=outcome,
@@ -1113,6 +1143,8 @@ def _score_search_result(
         score += 1.0
     if _url_looks_homepage_like(url):
         score -= 6.0
+    if _url_looks_live_or_streaming(url):
+        score -= 5.0
     if _looks_generic_result_title(title=title, hostname=parsed_url.hostname or ""):
         score -= 3.0
     if _passage_has_noise_signals(snippet):
@@ -1325,7 +1357,11 @@ def _run_iterative_retrieval(
     )
     final_sources = tuple(
         sorted(
-            sources_by_url.values(),
+            (
+                source
+                for source in sources_by_url.values()
+                if _source_worth_showing(source)
+            ),
             key=lambda source: (
                 -source.usefulness,
                 source.depth,
@@ -1444,6 +1480,12 @@ def _score_evidence_text(
         score -= 3.0
     score -= _passage_noise_score(text)
     if _looks_site_descriptive(text):
+        score -= 2.0
+    if _looks_promotional(text):
+        score -= 3.0
+    # Penalize very short passages with no keyword overlap (vague/low-signal)
+    keyword_overlap = _keyword_overlap_score(folded_text, query.keyword_tokens)
+    if len(tokens) < 12 and keyword_overlap == 0:
         score -= 2.0
     return score
 
@@ -1576,6 +1618,8 @@ def _score_fetched_page(
         hub_score += 2.0
     if _url_looks_article_like(page.resolved_url):
         hub_score -= 0.8
+    if _url_looks_live_or_streaming(page.resolved_url):
+        hub_score += 2.0
 
     terminal_score = 0.0
     if _url_looks_article_like(page.resolved_url):
@@ -1593,6 +1637,8 @@ def _score_fetched_page(
         link_count=internal_link_count,
     ):
         terminal_score -= 1.5
+    if _url_looks_live_or_streaming(page.resolved_url):
+        terminal_score -= 2.0
 
     usefulness = relevance * 3.0 + density * 1.5 + novelty * 2.0 + terminal_score - hub_score
     return _PageScores(
@@ -1693,6 +1739,26 @@ def _child_looks_more_content_rich(*, child_url: str, parent_url: str) -> bool:
     return len(child_segments) > len(parent_segments)
 
 
+def _source_worth_showing(source: _RetrievedSource) -> bool:
+    """Return True if a source is useful enough to display in final output."""
+    # Sources with genuine evidence are always worth showing
+    if source.evidence_count > 0 and not source.used_snippet_fallback:
+        return True
+    # Sources with strong snippet fallback evidence are acceptable
+    if source.evidence_count > 0 and source.usefulness >= 3.0:
+        return True
+    # Live/streaming pages are low value
+    if _url_looks_live_or_streaming(source.url):
+        return False
+    # Sources that were fetched but produced no evidence need high usefulness
+    if source.fetched and source.evidence_count == 0:
+        return source.usefulness >= 8.0
+    # Unfetched sources need at least a reasonable usefulness
+    if not source.fetched and source.evidence_count == 0:
+        return False
+    return source.usefulness >= 2.0
+
+
 def _should_stop_retrieval(
     *,
     evidence_items: list[_EvidenceItem],
@@ -1777,6 +1843,8 @@ def _is_informative_passage(text: str, *, title: str) -> bool:
         return False
     if _looks_site_descriptive(text):
         return False
+    if _looks_promotional(text):
+        return False
     return True
 
 
@@ -1843,6 +1911,8 @@ def _looks_site_descriptive(text: str) -> bool:
         "toutes les actualites",
         "toute l information",
         "decouvrez les dernieres",
+        "decouvrez toute l",
+        "decouvrez toutes les",
         "bienvenue sur",
         "welcome to our",
         "visit our",
@@ -1852,8 +1922,46 @@ def _looks_site_descriptive(text: str) -> bool:
         "abonnez vous",
         "stay up to date",
         "stay informed",
+        "suivez en direct",
+        "suivez en temps reel",
+        "regardez en direct",
+        "a suivre en direct",
+        "en direct sur",
+        "en continu sur",
+        "your source for",
+        "your daily source",
+        "votre source d",
+        "tout savoir sur",
+        "l essentiel de l actualite",
+        "toute l info",
     )
     return any(cue in folded for cue in _SITE_DESCRIPTIVE_CUES)
+
+
+def _looks_promotional(text: str) -> bool:
+    """Return True if the passage is promotional or service-oriented rather than factual."""
+    folded = _fold_for_match(text)
+    _PROMOTIONAL_CUES = (
+        "abonnez vous",
+        "commencez votre",
+        "creez votre compte",
+        "decouvrez nos offres",
+        "essai gratuit",
+        "essayez gratuitement",
+        "free trial",
+        "get started",
+        "inscrivez vous",
+        "join now",
+        "offre d abonnement",
+        "offre speciale",
+        "profitez de notre",
+        "sign up today",
+        "start your",
+        "subscribe now",
+        "try for free",
+        "upgrade your",
+    )
+    return any(cue in folded for cue in _PROMOTIONAL_CUES)
 
 
 def _passage_has_noise_signals(text: str) -> bool:
@@ -1890,8 +1998,13 @@ def _truncate_sentences(text: str, *, max_sentences: int, max_chars: int) -> str
     return _clip_text(text, limit=max_chars)
 
 
+_MIN_SUMMARY_EVIDENCE_SCORE = 3.0
+
+
 def _build_search_summary_points(
     evidence_items: tuple[_EvidenceItem, ...],
+    *,
+    query: _SearchQuery | None = None,
 ) -> tuple[str, ...]:
     if not evidence_items:
         return ()
@@ -1908,10 +2021,35 @@ def _build_search_summary_points(
             return 0.0
         return len(a & b) / min(len(a), len(b))
 
+    # Pre-filter: reject evidence below quality threshold and re-check for noise
+    quality_pool: list[_EvidenceItem] = []
+    for evidence in evidence_items:
+        if evidence.score < _MIN_SUMMARY_EVIDENCE_SCORE:
+            continue
+        if _looks_site_descriptive(evidence.text):
+            continue
+        if _looks_promotional(evidence.text):
+            continue
+        if _passage_has_noise_signals(evidence.text):
+            continue
+        quality_pool.append(evidence)
+
+    if not quality_pool:
+        # Relax threshold if nothing passes the strict filter
+        quality_pool = [e for e in evidence_items if e.score >= 1.5]
+
+    # Sort: prefer items with query keyword overlap, then by score
+    if query is not None:
+        def _sort_key(item: _EvidenceItem) -> tuple[int, float]:
+            folded = _fold_for_match(item.text)
+            overlap = _keyword_overlap_score(folded, query.keyword_tokens)
+            return (-overlap, -item.score)
+        quality_pool.sort(key=_sort_key)
+
     # Build candidate pool: deduplicate semantically across sources
     selected: list[_EvidenceItem] = []
     selected_content_sigs: list[frozenset[str]] = []
-    for evidence in evidence_items:
+    for evidence in quality_pool:
         content_sig = _content_words(evidence)
         # Skip if too similar to an already-selected point
         if any(
@@ -1927,7 +2065,7 @@ def _build_search_summary_points(
     # If we have room, favor source diversity: add items from unseen sources
     if len(selected) < _MAX_SUMMARY_POINTS:
         seen_domains = {urlparse(item.url).hostname for item in selected}
-        for evidence in evidence_items:
+        for evidence in quality_pool:
             if len(selected) >= _MAX_SUMMARY_POINTS:
                 break
             domain = urlparse(evidence.url).hostname
@@ -2045,6 +2183,11 @@ def _url_looks_article_like(url: str) -> bool:
 def _url_looks_archive_like(url: str) -> bool:
     path_segments = {segment.casefold() for segment in _url_path_segments(url)}
     return bool(path_segments & _HUB_PATH_CUES)
+
+
+def _url_looks_live_or_streaming(url: str) -> bool:
+    path_segments = {segment.casefold() for segment in _url_path_segments(url)}
+    return bool(path_segments & _LIVE_STREAMING_PATH_CUES)
 
 
 def _url_looks_low_value(url: str) -> bool:

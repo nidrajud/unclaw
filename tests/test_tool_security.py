@@ -668,11 +668,8 @@ def test_search_tool_prefers_article_like_child_pages_over_generic_parent_pages(
 
     assert result.success is True
     assert "1. Major release notes" in result.output_text
-    assert "2. Example Releases" in result.output_text
-    assert (
-        result.output_text.index("1. Major release notes")
-        < result.output_text.index("2. Example Releases")
-    )
+    # The hub page ("Example Releases") had no evidence and is correctly
+    # filtered from final output by source usefulness gating.
     assert result.payload is not None
     assert result.payload["results"][0]["url"] == "https://example.com/2026/03/14/major-release-notes"
 
@@ -1140,6 +1137,219 @@ def test_search_tool_summary_deduplicates_near_identical_bullets(
     assert merger_bullet_count <= 1
     # But distinct findings should still appear
     assert "Sources:" in result.output_text
+
+
+def test_search_tool_penalizes_live_streaming_pages(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Live TV / streaming / direct pages should rank below real articles."""
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    executor = ToolExecutor.with_default_tools(settings)
+
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools.socket.getaddrinfo",
+        lambda host, port, type=socket.SOCK_STREAM: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
+        ],
+    )
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools._open_request",
+        _build_search_open_request(
+            search_body="""
+            <html>
+              <body>
+                <div class="result">
+                  <a class="result__a" href="https://tv.example.com/direct/live-news">
+                    Watch Live News
+                  </a>
+                  <div class="result__snippet">
+                    Suivez en direct toute l'actualite en continu sur notre chaine.
+                  </div>
+                </div>
+                <div class="result">
+                  <a class="result__a" href="https://news.example.com/article/2025/03/14/economy-update">
+                    Economy Update
+                  </a>
+                  <div class="result__snippet">
+                    The central bank raised interest rates by 0.25 percent today.
+                  </div>
+                </div>
+              </body>
+            </html>
+            """,
+            page_bodies={
+                "https://tv.example.com/direct/live-news": """
+                <html><body>
+                <p>Regardez en direct notre chaine d'information continue 24 heures sur 24.</p>
+                <p>Suivez en direct les dernieres actualites en France et dans le monde.</p>
+                </body></html>
+                """,
+                "https://news.example.com/article/2025/03/14/economy-update": """
+                <html><body><article>
+                <p>The central bank raised its benchmark interest rate by 0.25 percent, citing persistent inflation in the services sector.</p>
+                <p>Economists expect at least one more rate increase before the end of the year.</p>
+                </article></body></html>
+                """,
+            },
+        ),
+    )
+
+    result = executor.execute(
+        ToolCall(
+            tool_name="search_web",
+            arguments={"query": "actualites importantes du jour"},
+        )
+    )
+
+    assert result.success is True
+    # The article content should appear, not the live/streaming noise
+    assert "interest rate" in result.output_text or "central bank" in result.output_text
+    # Live/streaming site-descriptive text should not appear in summary
+    summary_section = result.output_text.split("Sources:")[0]
+    assert "regardez en direct" not in summary_section.lower()
+    assert "suivez en direct" not in summary_section.lower()
+    # The article source should be ranked higher
+    sources_section = result.output_text.split("Sources:")[1] if "Sources:" in result.output_text else ""
+    if "Economy Update" in sources_section and "Watch Live News" in sources_section:
+        article_pos = sources_section.index("Economy Update")
+        live_pos = sources_section.index("Watch Live News")
+        assert article_pos < live_pos
+
+
+def test_search_tool_filters_promotional_and_subscription_text(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Promotional and subscription text should not leak into evidence or summary."""
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    executor = ToolExecutor.with_default_tools(settings)
+
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools.socket.getaddrinfo",
+        lambda host, port, type=socket.SOCK_STREAM: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
+        ],
+    )
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools._open_request",
+        _build_search_open_request(
+            search_body="""
+            <html>
+              <body>
+                <div class="result">
+                  <a class="result__a" href="https://news.example.com/article/2025/03/14/tech-layoffs">
+                    Tech Layoffs Report
+                  </a>
+                  <div class="result__snippet">
+                    Major tech companies announce significant workforce reductions.
+                  </div>
+                </div>
+              </body>
+            </html>
+            """,
+            page_bodies={
+                "https://news.example.com/article/2025/03/14/tech-layoffs": """
+                <html><body><article>
+                <p>Profitez de notre offre speciale: abonnez-vous pour seulement 1 euro le premier mois et accedez a tous nos contenus premium.</p>
+                <p>Deja abonne? Connectez-vous pour lire la suite de cet article reserve aux abonnes.</p>
+                <p>Three major technology companies announced layoffs affecting over 15000 employees across their global operations this week.</p>
+                <p>The restructuring is driven by declining advertising revenue and increased competition in the AI sector.</p>
+                </article></body></html>
+                """,
+            },
+        ),
+    )
+
+    result = executor.execute(
+        ToolCall(
+            tool_name="search_web",
+            arguments={"query": "tech company layoffs 2025"},
+        )
+    )
+
+    assert result.success is True
+    # Factual content should be kept
+    assert "layoffs" in result.output_text.lower() or "15000" in result.output_text
+    # Promotional/subscription noise must not appear in summary
+    summary_section = result.output_text.split("Sources:")[0]
+    assert "abonnez" not in summary_section.lower()
+    assert "offre speciale" not in summary_section.lower()
+    assert "deja abonne" not in summary_section.lower()
+
+
+def test_search_tool_excludes_weak_sources_from_output(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Sources with no kept evidence and low usefulness should not appear in final output."""
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    executor = ToolExecutor.with_default_tools(settings)
+
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools.socket.getaddrinfo",
+        lambda host, port, type=socket.SOCK_STREAM: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
+        ],
+    )
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools._open_request",
+        _build_search_open_request(
+            search_body="""
+            <html>
+              <body>
+                <div class="result">
+                  <a class="result__a" href="https://news.example.com/article/2025/03/14/trade-deal">
+                    Trade Deal Analysis
+                  </a>
+                  <div class="result__snippet">
+                    A landmark trade agreement was signed between two major economies yesterday.
+                  </div>
+                </div>
+                <div class="result">
+                  <a class="result__a" href="https://tv.example.com/live/stream">
+                    Watch Live Stream
+                  </a>
+                  <div class="result__snippet">
+                    Regardez notre direct en continu.
+                  </div>
+                </div>
+              </body>
+            </html>
+            """,
+            page_bodies={
+                "https://news.example.com/article/2025/03/14/trade-deal": """
+                <html><body><article>
+                <p>The two nations signed a comprehensive trade agreement eliminating tariffs on 95 percent of goods traded between them.</p>
+                <p>The deal is expected to boost bilateral trade by 40 percent over the next five years according to independent estimates.</p>
+                </article></body></html>
+                """,
+                "https://tv.example.com/live/stream": """
+                <html><body>
+                <p>Regardez en direct notre chaine d'information.</p>
+                <nav>Accueil Direct Replay Programmes</nav>
+                </body></html>
+                """,
+            },
+        ),
+    )
+
+    result = executor.execute(
+        ToolCall(
+            tool_name="search_web",
+            arguments={"query": "trade agreement signed"},
+        )
+    )
+
+    assert result.success is True
+    # The article content should appear
+    assert "trade" in result.output_text.lower()
+    # The live streaming page should not appear in final sources
+    sources_section = result.output_text.split("Sources:")[1] if "Sources:" in result.output_text else ""
+    assert "Watch Live Stream" not in sources_section
 
 
 def _create_temp_project(tmp_path: Path) -> Path:
