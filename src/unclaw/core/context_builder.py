@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from unclaw.core.capabilities import (
+    RuntimeCapabilitySummary,
+    build_runtime_capability_context,
+)
 from unclaw.core.session_manager import SessionManager
 from unclaw.llm.base import LLMMessage, LLMRole
 from unclaw.schemas.chat import ChatMessage, MessageRole
@@ -15,6 +19,7 @@ def build_context_messages(
     session_id: str,
     user_message: str,
     max_history_size: int | None = 20,
+    capability_summary: RuntimeCapabilitySummary | None = None,
 ) -> list[LLMMessage]:
     """Build the minimal message list sent to the selected model."""
     normalized_user_message = user_message.strip()
@@ -27,6 +32,13 @@ def build_context_messages(
     context_messages = [
         LLMMessage(role=LLMRole.SYSTEM, content=session_manager.settings.system_prompt)
     ]
+    if capability_summary is not None:
+        context_messages.append(
+            LLMMessage(
+                role=LLMRole.SYSTEM,
+                content=build_runtime_capability_context(capability_summary),
+            )
+        )
     context_messages.extend(_to_llm_message(message) for message in recent_history)
 
     if _should_append_current_user_message(recent_history, normalized_user_message):

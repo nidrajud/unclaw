@@ -2,17 +2,25 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
 
+from unclaw.core.capabilities import (
+    build_runtime_capability_context,
+    build_runtime_capability_summary,
+)
 from unclaw.core.command_handler import CommandHandler
 from unclaw.core.runtime import run_user_turn
 from unclaw.core.session_manager import SessionManager
-from unclaw.llm.base import LLMMessage, LLMResponse
+from unclaw.llm.base import LLMMessage, LLMResponse, LLMRole
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import TraceEvent, Tracer
 from unclaw.schemas.chat import MessageRole
 from unclaw.settings import load_settings
+from unclaw.tools.contracts import ToolResult
+from unclaw.tools.registry import ToolRegistry
+from unclaw.tools.web_tools import FETCH_URL_TEXT_DEFINITION
 
 
 def test_run_user_turn_persists_reply_and_emits_runtime_events(
@@ -33,6 +41,7 @@ def test_run_user_turn_persists_reply_and_emits_runtime_events(
     command_handler = CommandHandler(
         settings=settings,
         session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
     )
     captured: dict[str, object] = {}
 
@@ -106,6 +115,14 @@ def test_run_user_turn_persists_reply_and_emits_runtime_events(
         provider_messages = captured["messages"]
         assert isinstance(provider_messages, list)
         assert all(isinstance(message, LLMMessage) for message in provider_messages)
+        assert provider_messages[0].content == settings.system_prompt
+        assert provider_messages[1].role is LLMRole.SYSTEM
+        assert "Enabled built-in tools: 4" in provider_messages[1].content
+        assert "/read <path>" in provider_messages[1].content
+        assert "/fetch <url>" in provider_messages[1].content
+        assert "/search <query>" in provider_messages[1].content
+        assert "Session memory and summary access." in provider_messages[1].content
+        assert "no tools available" not in provider_messages[1].content.lower()
         assert provider_messages[-1].content == "Summarize this test run."
         assert captured["profile_name"] == settings.app.default_model_profile
         assert captured["thinking_enabled"] is False
@@ -132,6 +149,32 @@ def test_run_user_turn_persists_reply_and_emits_runtime_events(
         assert '"event_type": "model.succeeded"' in runtime_log
     finally:
         session_manager.close()
+
+
+def test_runtime_capability_summary_reports_available_and_missing_capabilities() -> None:
+    registry = ToolRegistry()
+    registry.register(
+        FETCH_URL_TEXT_DEFINITION,
+        lambda call: ToolResult.ok(tool_name=call.tool_name, output_text="ok"),
+    )
+
+    summary = build_runtime_capability_summary(
+        tool_registry=registry,
+        memory_summary_available=False,
+    )
+    context = build_runtime_capability_context(summary)
+
+    assert summary.enabled_builtin_tool_count == 1
+    assert summary.url_fetch_available is True
+    assert summary.web_search_available is False
+    assert summary.local_file_read_available is False
+    assert summary.local_directory_listing_available is False
+    assert summary.memory_summary_available is False
+    assert "Available built-in tools:" in context
+    assert "/fetch <url>: fetch one public URL and extract text." in context
+    assert "Web search via /search <query>." in context
+    assert "Session memory and summary access." in context
+    assert "Do not claim you have no tool access" in context
 
 
 def test_run_user_turn_uses_configured_ollama_timeout(

@@ -5,10 +5,11 @@ from __future__ import annotations
 import ipaddress
 import socket
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from unclaw.tools.contracts import (
@@ -22,6 +23,10 @@ from unclaw.tools.registry import ToolRegistry
 _DEFAULT_MAX_FETCH_CHARS = 8_000
 _MAX_FETCH_BYTES = 1_000_000
 _DEFAULT_TIMEOUT_SECONDS = 10.0
+_DEFAULT_MAX_SEARCH_RESULTS = 5
+_MAX_SEARCH_RESULTS = 10
+_DUCKDUCKGO_HTML_SEARCH_URL = "https://html.duckduckgo.com/html/"
+_SEARCH_PROVIDER_NAME = "DuckDuckGo HTML"
 _BLOCKED_FETCH_HOSTS = {
     "instance-data",
     "instance-data.ec2.internal",
@@ -65,6 +70,17 @@ FETCH_URL_TEXT_DEFINITION = ToolDefinition(
     },
 )
 
+SEARCH_WEB_DEFINITION = ToolDefinition(
+    name="search_web",
+    description="Search the public web and return compact result summaries.",
+    permission_level=ToolPermissionLevel.NETWORK,
+    arguments={
+        "query": "Plain-language search query.",
+        "max_results": "Optional maximum number of results to return, between 1 and 10.",
+        "timeout_seconds": "Optional request timeout in seconds.",
+    },
+)
+
 
 def register_web_tools(
     registry: ToolRegistry,
@@ -79,7 +95,11 @@ def register_web_tools(
             allow_private_networks=allow_private_networks,
         )
 
+    def search_handler(call: ToolCall) -> ToolResult:
+        return search_web(call)
+
     registry.register(FETCH_URL_TEXT_DEFINITION, fetch_handler)
+    registry.register(SEARCH_WEB_DEFINITION, search_handler)
 
 
 def fetch_url_text(
@@ -197,6 +217,99 @@ def fetch_url_text(
     )
 
 
+def search_web(call: ToolCall) -> ToolResult:
+    """Search the public web and return compact structured search results."""
+    tool_name = SEARCH_WEB_DEFINITION.name
+
+    try:
+        query = _read_string_argument(call.arguments, "query")
+        max_results = _read_limited_positive_int_argument(
+            call.arguments,
+            "max_results",
+            default=_DEFAULT_MAX_SEARCH_RESULTS,
+            maximum=_MAX_SEARCH_RESULTS,
+        )
+        timeout_seconds = _read_positive_number_argument(
+            call.arguments,
+            "timeout_seconds",
+            default=_DEFAULT_TIMEOUT_SECONDS,
+        )
+    except ValueError as exc:
+        return ToolResult.failure(tool_name=tool_name, error=str(exc))
+
+    request_url = f"{_DUCKDUCKGO_HTML_SEARCH_URL}?{urlencode({'q': query})}"
+
+    try:
+        _ensure_fetch_target_allowed(
+            request_url,
+            allow_private_networks=False,
+        )
+    except _BlockedFetchTargetError as exc:
+        return ToolResult.failure(tool_name=tool_name, error=str(exc))
+
+    request = Request(
+        request_url,
+        headers={
+            "User-Agent": "unclaw/0.1 (+https://local-first.invalid)",
+            "Accept": "text/html, application/xhtml+xml;q=0.9, */*;q=0.1",
+        },
+    )
+
+    try:
+        with _open_request(
+            request,
+            timeout_seconds=timeout_seconds,
+            allow_private_networks=False,
+        ) as response:
+            content_type = response.headers.get_content_type()
+            charset = response.headers.get_content_charset() or "utf-8"
+            raw_content = response.read(_MAX_FETCH_BYTES + 1)
+    except _BlockedFetchTargetError as exc:
+        return ToolResult.failure(tool_name=tool_name, error=str(exc))
+    except HTTPError as exc:
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error=(
+                f"Search provider returned HTTP error {exc.code} "
+                f"for '{query}': {exc.reason}"
+            ),
+        )
+    except URLError as exc:
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error=f"Could not search the web for '{query}': {exc.reason}",
+        )
+    except OSError as exc:
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error=f"Could not search the web for '{query}': {exc}",
+        )
+
+    if len(raw_content) > _MAX_FETCH_BYTES:
+        raw_content = raw_content[:_MAX_FETCH_BYTES]
+
+    if content_type not in {"text/html", "application/xhtml+xml"}:
+        return ToolResult.failure(
+            tool_name=tool_name,
+            error=f"Search provider returned unsupported content type: {content_type}",
+        )
+
+    response_text = _decode_content(raw_content, charset)
+    results = _parse_duckduckgo_html_results(response_text, max_results=max_results)
+    output_text = _format_search_results(query=query, results=results)
+
+    return ToolResult.ok(
+        tool_name=tool_name,
+        output_text=output_text,
+        payload={
+            "query": query,
+            "provider": _SEARCH_PROVIDER_NAME,
+            "result_count": len(results),
+            "results": [dict(result) for result in results],
+        },
+    )
+
+
 class _BlockedFetchTargetError(ValueError):
     """Raised when a fetch target is blocked by the safe default policy."""
 
@@ -262,6 +375,94 @@ class _HTMLTextExtractor(HTMLParser):
         return _normalize_text("".join(self._parts))
 
 
+@dataclass(slots=True)
+class _SearchResultBuilder:
+    """Collect one parsed DuckDuckGo HTML result block."""
+
+    url: str
+    title_parts: list[str] = field(default_factory=list)
+    snippet_parts: list[str] = field(default_factory=list)
+
+
+class _DuckDuckGoHTMLSearchParser(HTMLParser):
+    """Parse compact search results from DuckDuckGo's HTML endpoint."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._current_result: _SearchResultBuilder | None = None
+        self._capture_target: tuple[str, str] | None = None
+        self._results: list[dict[str, str]] = []
+
+    @property
+    def results(self) -> list[dict[str, str]]:
+        return self._results
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        attributes = dict(attrs)
+        classes = set((attributes.get("class") or "").split())
+
+        if tag == "a" and "result__a" in classes:
+            self._finalize_current_result()
+            self._current_result = _SearchResultBuilder(
+                url=_normalize_search_result_url(attributes.get("href"))
+            )
+            self._capture_target = ("title", tag)
+            return
+
+        if self._current_result is not None and "result__snippet" in classes:
+            self._capture_target = ("snippet", tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._capture_target is None:
+            return
+        _kind, captured_tag = self._capture_target
+        if tag == captured_tag:
+            self._capture_target = None
+
+    def handle_data(self, data: str) -> None:
+        if self._current_result is None or self._capture_target is None:
+            return
+
+        text = data.strip()
+        if not text:
+            return
+
+        kind, _tag = self._capture_target
+        if kind == "title":
+            self._current_result.title_parts.append(text)
+            return
+
+        self._current_result.snippet_parts.append(text)
+
+    def close(self) -> None:
+        super().close()
+        self._finalize_current_result()
+
+    def _finalize_current_result(self) -> None:
+        if self._current_result is None:
+            return
+
+        title = _normalize_text(" ".join(self._current_result.title_parts))
+        url = self._current_result.url.strip()
+        snippet = _normalize_text(" ".join(self._current_result.snippet_parts))
+
+        if title and url:
+            self._results.append(
+                {
+                    "title": title,
+                    "url": url,
+                    "snippet": snippet,
+                }
+            )
+
+        self._capture_target = None
+        self._current_result = None
+
+
 def _decode_content(raw_content: bytes, charset: str) -> str:
     try:
         return raw_content.decode(charset)
@@ -300,9 +501,62 @@ def _normalize_text(text: str) -> str:
     return "\n".join(normalized_lines).strip()
 
 
+def _parse_duckduckgo_html_results(
+    response_text: str,
+    *,
+    max_results: int,
+) -> list[dict[str, str]]:
+    parser = _DuckDuckGoHTMLSearchParser()
+    parser.feed(response_text)
+    parser.close()
+    return parser.results[:max_results]
+
+
+def _format_search_results(
+    *,
+    query: str,
+    results: list[dict[str, str]],
+) -> str:
+    lines = [
+        f"Search query: {query}",
+        f"Provider: {_SEARCH_PROVIDER_NAME}",
+        f"Results: {len(results)}",
+        "",
+    ]
+    if not results:
+        lines.append("No public web results found.")
+        return "\n".join(lines)
+
+    for index, result in enumerate(results, start=1):
+        lines.append(f"{index}. {result['title']}")
+        lines.append(f"   URL: {result['url']}")
+        snippet = result["snippet"] or "[no snippet]"
+        lines.append(f"   Snippet: {snippet}")
+        if index != len(results):
+            lines.append("")
+
+    return "\n".join(lines)
+
+
 def _is_supported_url(url: str) -> bool:
     parsed = urlparse(url)
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _normalize_search_result_url(raw_url: str | None) -> str:
+    if raw_url is None or not raw_url.strip():
+        return ""
+
+    resolved_url = urljoin(_DUCKDUCKGO_HTML_SEARCH_URL, raw_url.strip())
+    parsed = urlparse(resolved_url)
+    if parsed.netloc.endswith("duckduckgo.com") and parsed.path.rstrip("/") == "/l":
+        redirect_targets = parse_qs(parsed.query).get("uddg", ())
+        if redirect_targets:
+            target_url = unquote(redirect_targets[0]).strip()
+            if target_url:
+                return target_url
+
+    return resolved_url
 
 
 def _open_request(
@@ -463,6 +717,21 @@ def _read_positive_int_argument(
     return value
 
 
+def _read_limited_positive_int_argument(
+    arguments: Mapping[str, Any],
+    key: str,
+    *,
+    default: int,
+    maximum: int,
+) -> int:
+    value = _read_positive_int_argument(arguments, key, default=default)
+    if value > maximum:
+        raise ValueError(
+            f"Argument '{key}' must be less than or equal to {maximum}."
+        )
+    return value
+
+
 def _read_positive_number_argument(
     arguments: Mapping[str, Any],
     key: str,
@@ -479,6 +748,8 @@ def _read_positive_number_argument(
 
 __all__ = [
     "FETCH_URL_TEXT_DEFINITION",
+    "SEARCH_WEB_DEFINITION",
     "fetch_url_text",
+    "search_web",
     "register_web_tools",
 ]

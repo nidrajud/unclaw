@@ -14,13 +14,18 @@ from unclaw.tools.file_tools import (
     register_file_tools,
 )
 from unclaw.tools.registry import ToolRegistry
-from unclaw.tools.web_tools import FETCH_URL_TEXT_DEFINITION, register_web_tools
+from unclaw.tools.web_tools import (
+    FETCH_URL_TEXT_DEFINITION,
+    SEARCH_WEB_DEFINITION,
+    register_web_tools,
+)
 
 BUILTIN_TOOL_COMMANDS = MappingProxyType(
     {
         "read": READ_TEXT_FILE_DEFINITION.name,
         "ls": LIST_DIRECTORY_DEFINITION.name,
         "fetch": FETCH_URL_TEXT_DEFINITION.name,
+        "search": SEARCH_WEB_DEFINITION.name,
     }
 )
 

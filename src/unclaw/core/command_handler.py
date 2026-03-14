@@ -130,6 +130,11 @@ class CommandHandler:
                         parsed_command,
                         usage_line="/fetch <url>",
                     )
+                case "search":
+                    return self._handle_tool_command(
+                        parsed_command,
+                        usage_line="/search <query>",
+                    )
                 case "help":
                     return self._handle_help(parsed_command.arguments)
                 case "exit":
@@ -298,7 +303,10 @@ class CommandHandler:
                 "Use /help to list commands."
             )
 
-        argument_key = "url" if parsed_command.name == "fetch" else "path"
+        argument_key = {
+            "fetch": "url",
+            "search": "query",
+        }.get(parsed_command.name, "path")
         return CommandResult(
             status=CommandStatus.OK,
             lines=(),
@@ -332,6 +340,7 @@ class CommandHandler:
             "/read <path>      Read one local file inside allowed roots.",
             "/ls [path]        List one local directory inside allowed roots. Defaults to the current directory.",
             "/fetch <url>      Fetch one public URL.",
+            "/search <query>  Search the public web and return compact results.",
             "",
             "Memory:",
             "/session  Show the current session state.",
@@ -344,6 +353,7 @@ class CommandHandler:
             "/ls .",
             "/ls /home/user/project",
             "/read README.md",
+            "/search local ai agents",
         ]
         if self.allow_exit:
             lines.append("/exit  Leave the terminal runtime.")

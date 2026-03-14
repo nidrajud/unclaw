@@ -33,6 +33,10 @@ def test_help_lists_enriched_commands_for_cli() -> None:
         in result.lines
     )
     assert "/fetch <url>      Fetch one public URL." in result.lines
+    assert (
+        "/search <query>  Search the public web and return compact results."
+        in result.lines
+    )
     assert "/session  Show the current session state." in result.lines
     assert "/summary  Show the saved session summary." in result.lines
     assert "/help  Show this command list with examples." in result.lines
@@ -40,6 +44,7 @@ def test_help_lists_enriched_commands_for_cli() -> None:
     assert "/ls ." in result.lines
     assert "/ls /home/user/project" in result.lines
     assert "/read README.md" in result.lines
+    assert "/search local ai agents" in result.lines
     assert "/exit  Leave the terminal runtime." in result.lines
     assert (
         "Tip: use 'unclaw logs' or 'unclaw logs full' in another terminal."
@@ -159,6 +164,22 @@ def test_ls_defaults_to_current_directory_when_no_path_is_given() -> None:
     assert result.tool_call is not None
     assert result.tool_call.tool_name == "list_directory"
     assert result.tool_call.arguments == {"path": "."}
+
+
+def test_search_uses_freeform_query_and_wires_to_search_tool() -> None:
+    handler = CommandHandler(
+        settings=_load_repo_settings(),
+        session_manager=_build_session_manager(),
+    )
+
+    result = handler.handle("/search local-first agent runtime")
+
+    assert result.status is CommandStatus.OK
+    assert result.tool_call is not None
+    assert result.tool_call.tool_name == "search_web"
+    assert result.tool_call.arguments == {
+        "query": "local-first agent runtime",
+    }
 
 
 def _load_repo_settings():

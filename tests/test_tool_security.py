@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import socket
 from pathlib import Path
+from urllib.error import URLError
 
 import yaml
 
@@ -12,18 +13,33 @@ from unclaw.tools.contracts import ToolCall
 
 
 class _FakeHeaders:
+    def __init__(
+        self,
+        *,
+        content_type: str = "text/plain",
+        charset: str = "utf-8",
+    ) -> None:
+        self._content_type = content_type
+        self._charset = charset
+
     def get_content_type(self) -> str:
-        return "text/plain"
+        return self._content_type
 
     def get_content_charset(self) -> str:
-        return "utf-8"
+        return self._charset
 
 
 class _FakeResponse:
-    def __init__(self, *, url: str, body: str) -> None:
+    def __init__(
+        self,
+        *,
+        url: str,
+        body: str,
+        content_type: str = "text/plain",
+    ) -> None:
         self._url = url
         self._body = body.encode("utf-8")
-        self.headers = _FakeHeaders()
+        self.headers = _FakeHeaders(content_type=content_type)
         self.status = 200
 
     def geturl(self) -> str:
@@ -40,6 +56,15 @@ class _FakeResponse:
     def __exit__(self, exc_type, exc, traceback) -> bool:  # type: ignore[no-untyped-def]
         del exc_type, exc, traceback
         return False
+
+
+def _raise_url_timeout(
+    request,
+    timeout_seconds,
+    allow_private_networks,
+):  # type: ignore[no-untyped-def]
+    del request, timeout_seconds, allow_private_networks
+    raise URLError("timed out")
 
 
 def test_read_tool_rejects_paths_outside_allowed_roots(tmp_path: Path) -> None:
@@ -170,6 +195,100 @@ def test_fetch_tool_can_opt_in_to_private_network_access(
 
     assert result.success is True
     assert "private content" in result.output_text
+
+
+def test_search_tool_returns_compact_structured_results(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    executor = ToolExecutor.with_default_tools(settings)
+
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools.socket.getaddrinfo",
+        lambda host, port, type=socket.SOCK_STREAM: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
+        ],
+    )
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools._open_request",
+        lambda request, timeout_seconds, allow_private_networks: _FakeResponse(
+            url=request.full_url,
+            body="""
+            <html>
+              <body>
+                <div class="result">
+                  <a class="result__a" href="/l/?uddg=https%3A%2F%2Fexample.com%2Fdocs">
+                    Example Docs
+                  </a>
+                  <div class="result__snippet">
+                    Read the example documentation for local-first agents.
+                  </div>
+                </div>
+                <div class="result">
+                  <a class="result__a" href="https://blog.example.com/post">
+                    Agent Notes
+                  </a>
+                  <a class="result__snippet">
+                    A short article about practical local AI agents.
+                  </a>
+                </div>
+              </body>
+            </html>
+            """,
+            content_type="text/html",
+        ),
+    )
+
+    result = executor.execute(
+        ToolCall(
+            tool_name="search_web",
+            arguments={"query": "local first agents"},
+        )
+    )
+
+    assert result.success is True
+    assert "Search query: local first agents" in result.output_text
+    assert "1. Example Docs" in result.output_text
+    assert "URL: https://example.com/docs" in result.output_text
+    assert (
+        "Snippet: Read the example documentation for local-first agents."
+        in result.output_text
+    )
+    assert "2. Agent Notes" in result.output_text
+    assert result.payload is not None
+    assert result.payload["result_count"] == 2
+
+
+def test_search_tool_reports_provider_failures_cleanly(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    executor = ToolExecutor.with_default_tools(settings)
+
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools.socket.getaddrinfo",
+        lambda host, port, type=socket.SOCK_STREAM: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
+        ],
+    )
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools._open_request",
+        _raise_url_timeout,
+    )
+
+    result = executor.execute(
+        ToolCall(
+            tool_name="search_web",
+            arguments={"query": "local first agents"},
+        )
+    )
+
+    assert result.success is False
+    assert result.error == "Could not search the web for 'local first agents': timed out"
 
 
 def _create_temp_project(tmp_path: Path) -> Path:

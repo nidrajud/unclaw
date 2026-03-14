@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from time import perf_counter
+from typing import TYPE_CHECKING
 
+from unclaw.core.capabilities import build_runtime_capability_summary
 from unclaw.core.command_handler import CommandHandler
+from unclaw.core.executor import create_default_tool_registry
 from unclaw.core.orchestrator import (
     ModelCallFailedError,
     Orchestrator,
@@ -17,6 +20,9 @@ from unclaw.llm.base import LLMContentCallback, LLMError
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
 from unclaw.schemas.chat import MessageRole
+
+if TYPE_CHECKING:
+    from unclaw.tools.registry import ToolRegistry
 
 _RUNTIME_ERROR_REPLY = (
     "I could not complete that request locally right now. "
@@ -33,6 +39,7 @@ def run_user_turn(
     tracer: Tracer | None = None,
     event_bus: EventBus | None = None,
     stream_output_func: LLMContentCallback | None = None,
+    tool_registry: ToolRegistry | None = None,
 ) -> str:
     """Run the minimal runtime path and persist the assistant reply."""
     session = session_manager.ensure_current_session()
@@ -52,6 +59,13 @@ def run_user_turn(
     selected_model_profile_name = command_handler.current_model_profile.name
     selected_model = command_handler.current_model_profile
     thinking_enabled = command_handler.thinking_enabled is True
+    active_tool_registry = tool_registry or create_default_tool_registry(
+        session_manager.settings
+    )
+    capability_summary = build_runtime_capability_summary(
+        tool_registry=active_tool_registry,
+        memory_summary_available=command_handler.memory_manager is not None,
+    )
     turn_started_at = perf_counter()
 
     active_tracer.trace_runtime_started(
@@ -84,6 +98,7 @@ def run_user_turn(
             session_id=session.id,
             user_message=user_input,
             model_profile_name=route.model_profile_name,
+            capability_summary=capability_summary,
             thinking_enabled=thinking_enabled,
             content_callback=stream_output_func,
         )

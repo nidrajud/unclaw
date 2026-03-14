@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from time import perf_counter
 
+from unclaw.core.capabilities import RuntimeCapabilitySummary
 from unclaw.core.context_builder import build_context_messages
 from unclaw.core.session_manager import SessionManager
 from unclaw.errors import UnclawError
@@ -62,6 +63,7 @@ class Orchestrator:
         user_message: str,
         model_profile_name: str,
         max_history_size: int | None = 20,
+        capability_summary: RuntimeCapabilitySummary | None = None,
         thinking_enabled: bool = False,
         content_callback: LLMContentCallback | None = None,
     ) -> OrchestratorTurnResult:
@@ -73,6 +75,7 @@ class Orchestrator:
             session_id=session_id,
             user_message=user_message,
             max_history_size=max_history_size,
+            capability_summary=capability_summary,
         )
 
         self.tracer.trace_model_called(
