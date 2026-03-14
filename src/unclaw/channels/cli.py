@@ -187,6 +187,11 @@ def run_cli(
                     error=tool_result.error,
                     tool_duration_ms=_elapsed_ms(tool_started_at),
                 )
+                _persist_tool_result(
+                    session_manager=session_manager,
+                    session_id=session.id,
+                    result=tool_result,
+                )
                 _render_tool_result(tool_result)
                 continue
             _render_command_result(result)
@@ -322,6 +327,34 @@ def _render_tool_result(result: ToolResult) -> None:
     print(f"Error: {first_line}")
     for line in other_lines:
         print(line)
+
+
+def _persist_tool_result(
+    *,
+    session_manager: SessionManager,
+    session_id: str,
+    result: ToolResult,
+) -> None:
+    if not result.output_text.strip():
+        return
+
+    session_manager.add_message(
+        MessageRole.TOOL,
+        _build_tool_history_content(result),
+        session_id=session_id,
+    )
+
+
+def _build_tool_history_content(result: ToolResult) -> str:
+    outcome = "success" if result.success else "error"
+    return "\n".join(
+        [
+            f"Tool: {result.tool_name}",
+            f"Outcome: {outcome}",
+            "",
+            result.output_text.strip(),
+        ]
+    )
 
 
 def _elapsed_ms(started_at: float) -> int:

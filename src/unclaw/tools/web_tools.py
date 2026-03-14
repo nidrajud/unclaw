@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import re
 import socket
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -25,6 +26,11 @@ _MAX_FETCH_BYTES = 1_000_000
 _DEFAULT_TIMEOUT_SECONDS = 10.0
 _DEFAULT_MAX_SEARCH_RESULTS = 5
 _MAX_SEARCH_RESULTS = 10
+_DEFAULT_MAX_SEARCH_READS = 3
+_DEFAULT_SEARCH_FETCH_CHARS = 3_500
+_MAX_SUMMARY_POINTS = 4
+_MAX_SUMMARY_POINT_CHARS = 220
+_MAX_SOURCE_NOTE_CHARS = 220
 _DUCKDUCKGO_HTML_SEARCH_URL = "https://html.duckduckgo.com/html/"
 _SEARCH_PROVIDER_NAME = "DuckDuckGo HTML"
 _BLOCKED_FETCH_HOSTS = {
@@ -72,7 +78,7 @@ FETCH_URL_TEXT_DEFINITION = ToolDefinition(
 
 SEARCH_WEB_DEFINITION = ToolDefinition(
     name="search_web",
-    description="Search the public web and return compact result summaries.",
+    description="Search the public web, read top sources, and return a compact summary.",
     permission_level=ToolPermissionLevel.NETWORK,
     arguments={
         "query": "Plain-language search query.",
@@ -132,32 +138,17 @@ def fetch_url_text(
         )
 
     try:
-        _ensure_fetch_target_allowed(
+        document = _fetch_text_document(
             url,
-            allow_private_networks=allow_private_networks,
-        )
-    except _BlockedFetchTargetError as exc:
-        return ToolResult.failure(tool_name=tool_name, error=str(exc))
-
-    request = Request(
-        url,
-        headers={
-            "User-Agent": "unclaw/0.1 (+https://local-first.invalid)",
-            "Accept": "text/plain, text/html, application/json;q=0.9, */*;q=0.1",
-        },
-    )
-
-    try:
-        with _open_request(
-            request,
+            max_chars=max_chars,
             timeout_seconds=timeout_seconds,
             allow_private_networks=allow_private_networks,
-        ) as response:
-            content_type = response.headers.get_content_type()
-            charset = response.headers.get_content_charset() or "utf-8"
-            status_code = getattr(response, "status", None)
-            resolved_url = response.geturl()
-            raw_content = response.read(_MAX_FETCH_BYTES + 1)
+            accept_header=(
+                "text/plain, text/html, application/json;q=0.9, */*;q=0.1"
+            ),
+        )
+    except ValueError as exc:
+        return ToolResult.failure(tool_name=tool_name, error=str(exc))
     except _BlockedFetchTargetError as exc:
         return ToolResult.failure(tool_name=tool_name, error=str(exc))
     except HTTPError as exc:
@@ -176,32 +167,16 @@ def fetch_url_text(
             error=f"Could not fetch '{url}': {exc}",
         )
 
-    if len(raw_content) > _MAX_FETCH_BYTES:
-        raw_content = raw_content[:_MAX_FETCH_BYTES]
-
-    decoded_text = _decode_content(raw_content, charset)
-    extracted_text = _extract_text(decoded_text, content_type)
-    if extracted_text is None:
-        return ToolResult.failure(
-            tool_name=tool_name,
-            error=f"Unsupported content type for text extraction: {content_type}",
-        )
-
-    if not extracted_text:
-        extracted_text = "[empty response body]"
-
-    truncated = len(extracted_text) > max_chars
-    display_text = extracted_text[:max_chars] if truncated else extracted_text
-    if truncated:
-        display_text = f"{display_text.rstrip()}\n\n[truncated]"
-
     output_text = "\n".join(
         [
-            f"URL: {resolved_url}",
-            f"Status: {status_code or 'unknown'}",
-            f"Content-Type: {content_type}",
+            f"URL: {document.resolved_url}",
+            f"Status: {document.status_code or 'unknown'}",
+            f"Content-Type: {document.content_type}",
             "",
-            display_text,
+            _format_text_excerpt(
+                document.text_excerpt,
+                truncated=document.truncated,
+            ),
         ]
     )
     return ToolResult.ok(
@@ -209,16 +184,16 @@ def fetch_url_text(
         output_text=output_text,
         payload={
             "requested_url": url,
-            "resolved_url": resolved_url,
-            "status_code": status_code,
-            "content_type": content_type,
-            "truncated": truncated,
+            "resolved_url": document.resolved_url,
+            "status_code": document.status_code,
+            "content_type": document.content_type,
+            "truncated": document.truncated,
         },
     )
 
 
 def search_web(call: ToolCall) -> ToolResult:
-    """Search the public web and return compact structured search results."""
+    """Search the public web, read a few pages, and synthesize compact results."""
     tool_name = SEARCH_WEB_DEFINITION.name
 
     try:
@@ -237,33 +212,11 @@ def search_web(call: ToolCall) -> ToolResult:
     except ValueError as exc:
         return ToolResult.failure(tool_name=tool_name, error=str(exc))
 
-    request_url = f"{_DUCKDUCKGO_HTML_SEARCH_URL}?{urlencode({'q': query})}"
-
     try:
-        _ensure_fetch_target_allowed(
-            request_url,
-            allow_private_networks=False,
-        )
-    except _BlockedFetchTargetError as exc:
-        return ToolResult.failure(tool_name=tool_name, error=str(exc))
-
-    request = Request(
-        request_url,
-        headers={
-            "User-Agent": "unclaw/0.1 (+https://local-first.invalid)",
-            "Accept": "text/html, application/xhtml+xml;q=0.9, */*;q=0.1",
-        },
-    )
-
-    try:
-        with _open_request(
-            request,
+        response_text = _search_public_web(
+            query=query,
             timeout_seconds=timeout_seconds,
-            allow_private_networks=False,
-        ) as response:
-            content_type = response.headers.get_content_type()
-            charset = response.headers.get_content_charset() or "utf-8"
-            raw_content = response.read(_MAX_FETCH_BYTES + 1)
+        )
     except _BlockedFetchTargetError as exc:
         return ToolResult.failure(tool_name=tool_name, error=str(exc))
     except HTTPError as exc:
@@ -284,19 +237,26 @@ def search_web(call: ToolCall) -> ToolResult:
             tool_name=tool_name,
             error=f"Could not search the web for '{query}': {exc}",
         )
+    except ValueError as exc:
+        return ToolResult.failure(tool_name=tool_name, error=str(exc))
 
-    if len(raw_content) > _MAX_FETCH_BYTES:
-        raw_content = raw_content[:_MAX_FETCH_BYTES]
-
-    if content_type not in {"text/html", "application/xhtml+xml"}:
-        return ToolResult.failure(
-            tool_name=tool_name,
-            error=f"Search provider returned unsupported content type: {content_type}",
-        )
-
-    response_text = _decode_content(raw_content, charset)
-    results = _parse_duckduckgo_html_results(response_text, max_results=max_results)
-    output_text = _format_search_results(query=query, results=results)
+    raw_results = _parse_duckduckgo_html_results(response_text, max_results=max_results)
+    results = _deduplicate_search_results(raw_results)
+    sources, read_attempt_count = _build_search_sources(
+        results=results,
+        timeout_seconds=timeout_seconds,
+    )
+    summary_points = _build_search_summary_points(
+        sources=sources,
+        read_attempt_count=read_attempt_count,
+    )
+    output_text = _format_search_results(
+        query=query,
+        results=sources,
+        read_attempt_count=read_attempt_count,
+        summary_points=summary_points,
+    )
+    read_success_count = sum(1 for source in sources if source["fetched"])
 
     return ToolResult.ok(
         tool_name=tool_name,
@@ -305,7 +265,10 @@ def search_web(call: ToolCall) -> ToolResult:
             "query": query,
             "provider": _SEARCH_PROVIDER_NAME,
             "result_count": len(results),
-            "results": [dict(result) for result in results],
+            "read_attempt_count": read_attempt_count,
+            "read_success_count": read_success_count,
+            "summary_points": list(summary_points),
+            "results": [dict(result) for result in sources],
         },
     )
 
@@ -382,6 +345,30 @@ class _SearchResultBuilder:
     url: str
     title_parts: list[str] = field(default_factory=list)
     snippet_parts: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class _FetchedTextDocument:
+    """Compact extracted text payload for one fetched public URL."""
+
+    requested_url: str
+    resolved_url: str
+    status_code: int | None
+    content_type: str
+    text_excerpt: str
+    truncated: bool
+
+
+@dataclass(slots=True)
+class _SearchSourceSummary:
+    """One search result enriched with a lightweight read summary."""
+
+    title: str
+    url: str
+    snippet: str
+    note: str
+    fetched: bool
+    fetch_error: str | None = None
 
 
 class _DuckDuckGoHTMLSearchParser(HTMLParser):
@@ -512,30 +499,396 @@ def _parse_duckduckgo_html_results(
     return parser.results[:max_results]
 
 
+def _search_public_web(*, query: str, timeout_seconds: float) -> str:
+    request_url = f"{_DUCKDUCKGO_HTML_SEARCH_URL}?{urlencode({'q': query})}"
+    _ensure_fetch_target_allowed(
+        request_url,
+        allow_private_networks=False,
+    )
+
+    request = Request(
+        request_url,
+        headers={
+            "User-Agent": "unclaw/0.1 (+https://local-first.invalid)",
+            "Accept": "text/html, application/xhtml+xml;q=0.9, */*;q=0.1",
+        },
+    )
+
+    with _open_request(
+        request,
+        timeout_seconds=timeout_seconds,
+        allow_private_networks=False,
+    ) as response:
+        content_type = response.headers.get_content_type()
+        charset = response.headers.get_content_charset() or "utf-8"
+        raw_content = response.read(_MAX_FETCH_BYTES + 1)
+
+    if len(raw_content) > _MAX_FETCH_BYTES:
+        raw_content = raw_content[:_MAX_FETCH_BYTES]
+
+    if content_type not in {"text/html", "application/xhtml+xml"}:
+        raise ValueError(
+            f"Search provider returned unsupported content type: {content_type}"
+        )
+
+    return _decode_content(raw_content, charset)
+
+
+def _fetch_text_document(
+    url: str,
+    *,
+    max_chars: int,
+    timeout_seconds: float,
+    allow_private_networks: bool,
+    accept_header: str,
+) -> _FetchedTextDocument:
+    _ensure_fetch_target_allowed(
+        url,
+        allow_private_networks=allow_private_networks,
+    )
+
+    request = Request(
+        url,
+        headers={
+            "User-Agent": "unclaw/0.1 (+https://local-first.invalid)",
+            "Accept": accept_header,
+        },
+    )
+
+    with _open_request(
+        request,
+        timeout_seconds=timeout_seconds,
+        allow_private_networks=allow_private_networks,
+    ) as response:
+        content_type = response.headers.get_content_type()
+        charset = response.headers.get_content_charset() or "utf-8"
+        status_code = getattr(response, "status", None)
+        resolved_url = response.geturl()
+        raw_content = response.read(_MAX_FETCH_BYTES + 1)
+
+    if len(raw_content) > _MAX_FETCH_BYTES:
+        raw_content = raw_content[:_MAX_FETCH_BYTES]
+
+    decoded_text = _decode_content(raw_content, charset)
+    extracted_text = _extract_text(decoded_text, content_type)
+    if extracted_text is None:
+        raise ValueError(
+            f"Unsupported content type for text extraction: {content_type}"
+        )
+
+    if not extracted_text:
+        extracted_text = "[empty response body]"
+
+    truncated = len(extracted_text) > max_chars
+    text_excerpt = extracted_text[:max_chars].rstrip() if truncated else extracted_text
+    return _FetchedTextDocument(
+        requested_url=url,
+        resolved_url=resolved_url,
+        status_code=status_code,
+        content_type=content_type,
+        text_excerpt=text_excerpt,
+        truncated=truncated,
+    )
+
+
+def _format_text_excerpt(text: str, *, truncated: bool) -> str:
+    if not truncated:
+        return text
+    return f"{text}\n\n[truncated]"
+
+
+def _deduplicate_search_results(results: list[dict[str, str]]) -> list[dict[str, str]]:
+    deduplicated: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+
+    for result in results:
+        url = result["url"].strip()
+        if not url or url in seen_urls:
+            continue
+        deduplicated.append(dict(result))
+        seen_urls.add(url)
+
+    return deduplicated
+
+
+def _build_search_sources(
+    *,
+    results: list[dict[str, str]],
+    timeout_seconds: float,
+) -> tuple[list[dict[str, Any]], int]:
+    read_limit = min(len(results), _DEFAULT_MAX_SEARCH_READS)
+    sources: list[dict[str, Any]] = []
+    read_attempt_count = 0
+
+    for index, result in enumerate(results):
+        source = _SearchSourceSummary(
+            title=result["title"],
+            url=result["url"],
+            snippet=result["snippet"],
+            note="",
+            fetched=False,
+        )
+
+        if index < read_limit:
+            read_attempt_count += 1
+            try:
+                document = _fetch_text_document(
+                    source.url,
+                    max_chars=_DEFAULT_SEARCH_FETCH_CHARS,
+                    timeout_seconds=timeout_seconds,
+                    allow_private_networks=False,
+                    accept_header=(
+                        "text/plain, text/html, application/json;q=0.9, */*;q=0.1"
+                    ),
+                )
+            except (_BlockedFetchTargetError, HTTPError, URLError, OSError, ValueError) as exc:
+                source.fetch_error = _summarize_source_fetch_error(exc)
+            else:
+                source.url = document.resolved_url
+                source.fetched = True
+                source.note = _build_search_source_note(
+                    document.text_excerpt,
+                    fallback_snippet=source.snippet,
+                )
+
+        if not source.note:
+            source.note = _build_search_source_note(
+                "",
+                fallback_snippet=source.snippet,
+                fetch_error=source.fetch_error,
+            )
+
+        sources.append(
+            {
+                "title": source.title,
+                "url": source.url,
+                "snippet": source.snippet,
+                "note": source.note,
+                "fetched": source.fetched,
+                "fetch_error": source.fetch_error,
+            }
+        )
+
+    return sources, read_attempt_count
+
+
+def _summarize_source_fetch_error(exc: Exception) -> str:
+    if isinstance(exc, HTTPError):
+        return f"HTTP {exc.code}: {exc.reason}"
+    if isinstance(exc, URLError):
+        return f"Network error: {exc.reason}"
+    return str(exc)
+
+
+def _build_search_source_note(
+    document_text: str,
+    *,
+    fallback_snippet: str,
+    fetch_error: str | None = None,
+) -> str:
+    note = _summarize_document_text(
+        document_text,
+        max_sentences=2,
+        max_chars=_MAX_SOURCE_NOTE_CHARS,
+    )
+    if note:
+        return note
+
+    normalized_snippet = _normalize_text(fallback_snippet)
+    if normalized_snippet:
+        if fetch_error:
+            return _clip_text(
+                f"{normalized_snippet} (Used the search snippet because the page read failed.)",
+                limit=_MAX_SOURCE_NOTE_CHARS,
+            )
+        return _clip_text(normalized_snippet, limit=_MAX_SOURCE_NOTE_CHARS)
+
+    if fetch_error:
+        return _clip_text(
+            f"Could not read this page directly: {fetch_error}",
+            limit=_MAX_SOURCE_NOTE_CHARS,
+        )
+
+    return "Search result found, but no readable text was extracted."
+
+
+def _summarize_document_text(
+    text: str,
+    *,
+    max_sentences: int,
+    max_chars: int,
+) -> str:
+    normalized = _normalize_text(text)
+    if not normalized:
+        return ""
+
+    for paragraph in normalized.split("\n\n"):
+        if not _is_informative_passage(paragraph):
+            continue
+        summary = _truncate_sentences(
+            paragraph,
+            max_sentences=max_sentences,
+            max_chars=max_chars,
+        )
+        if summary:
+            return summary
+
+    return _clip_text(normalized, limit=max_chars)
+
+
+def _is_informative_passage(text: str) -> bool:
+    words = text.split()
+    if len(words) < 8:
+        return False
+
+    lowered = text.casefold()
+    return not lowered.startswith(
+        (
+            "menu ",
+            "sign in",
+            "skip to",
+            "cookie ",
+            "copyright ",
+            "all rights reserved",
+        )
+    )
+
+
+def _truncate_sentences(text: str, *, max_sentences: int, max_chars: int) -> str:
+    sentences = [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+", text)
+        if sentence.strip()
+    ]
+    if not sentences:
+        return _clip_text(text, limit=max_chars)
+
+    selected = " ".join(sentences[:max_sentences]).strip()
+    if selected:
+        return _clip_text(selected, limit=max_chars)
+    return _clip_text(text, limit=max_chars)
+
+
+def _build_search_summary_points(
+    *,
+    sources: list[dict[str, Any]],
+    read_attempt_count: int,
+) -> tuple[str, ...]:
+    if not sources:
+        return ()
+
+    read_success_count = sum(1 for source in sources if source["fetched"])
+    fallback_count = sum(1 for source in sources if not source["fetched"])
+    points: list[str] = [
+        _build_search_workflow_summary(
+            result_count=len(sources),
+            read_attempt_count=read_attempt_count,
+            read_success_count=read_success_count,
+            fallback_count=fallback_count,
+        )
+    ]
+
+    seen_signatures: set[str] = set()
+    for source in sources:
+        note = source["note"].strip()
+        if not note:
+            continue
+        signature = _build_note_signature(note)
+        if signature in seen_signatures:
+            continue
+        seen_signatures.add(signature)
+        points.append(
+            _clip_text(
+                f"{source['title']}: {note}",
+                limit=_MAX_SUMMARY_POINT_CHARS,
+            )
+        )
+        if len(points) >= _MAX_SUMMARY_POINTS:
+            break
+
+    return tuple(point for point in points if point.strip())
+
+
+def _build_search_workflow_summary(
+    *,
+    result_count: int,
+    read_attempt_count: int,
+    read_success_count: int,
+    fallback_count: int,
+) -> str:
+    if result_count == 0:
+        return "No relevant public results were found."
+    if read_attempt_count == 0:
+        return f"I found {result_count} public result(s) but did not read any pages directly."
+    if read_success_count == 0:
+        return (
+            f"I found {result_count} public result(s), but direct page reads failed, "
+            "so this recap relies on search listings."
+        )
+    if fallback_count == 0:
+        return (
+            f"I searched {result_count} public result(s) and read "
+            f"{read_success_count} top source(s) directly."
+        )
+    return (
+        f"I searched {result_count} public result(s), read {read_success_count} "
+        f"top source(s), and filled {fallback_count} gap(s) from search listings."
+    )
+
+
+def _build_note_signature(text: str) -> str:
+    words = re.findall(r"[a-z0-9]+", text.casefold())
+    if not words:
+        return text.casefold()
+    return " ".join(words[:12])
+
+
 def _format_search_results(
     *,
     query: str,
-    results: list[dict[str, str]],
+    results: list[dict[str, Any]],
+    read_attempt_count: int,
+    summary_points: tuple[str, ...],
 ) -> str:
+    read_success_count = sum(1 for result in results if result["fetched"])
     lines = [
         f"Search query: {query}",
         f"Provider: {_SEARCH_PROVIDER_NAME}",
-        f"Results: {len(results)}",
+        (
+            "Sources considered: "
+            f"{len(results)} | Sources read: {read_success_count} of "
+            f"{read_attempt_count} attempted"
+        ),
         "",
     ]
     if not results:
         lines.append("No public web results found.")
         return "\n".join(lines)
 
+    lines.append("Summary:")
+    for point in summary_points:
+        lines.append(f"- {point}")
+    lines.append("")
+    lines.append("Sources:")
+
     for index, result in enumerate(results, start=1):
         lines.append(f"{index}. {result['title']}")
         lines.append(f"   URL: {result['url']}")
-        snippet = result["snippet"] or "[no snippet]"
-        lines.append(f"   Snippet: {snippet}")
+        note_label = "Takeaway" if result["fetched"] else "Note"
+        lines.append(f"   {note_label}: {result['note']}")
         if index != len(results):
             lines.append("")
 
     return "\n".join(lines)
+
+
+def _clip_text(value: str, *, limit: int) -> str:
+    normalized = " ".join(value.split()).strip()
+    if len(normalized) <= limit:
+        return normalized
+
+    clipped = normalized[: limit - 3].rstrip(" ,;:.")
+    return f"{clipped}..."
 
 
 def _is_supported_url(url: str) -> bool:

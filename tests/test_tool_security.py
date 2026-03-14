@@ -213,9 +213,8 @@ def test_search_tool_returns_compact_structured_results(
     )
     monkeypatch.setattr(
         "unclaw.tools.web_tools._open_request",
-        lambda request, timeout_seconds, allow_private_networks: _FakeResponse(
-            url=request.full_url,
-            body="""
+        _build_search_open_request(
+            search_body="""
             <html>
               <body>
                 <div class="result">
@@ -237,7 +236,20 @@ def test_search_tool_returns_compact_structured_results(
               </body>
             </html>
             """,
-            content_type="text/html",
+            page_bodies={
+                "https://example.com/docs": """
+                <html><body><main>
+                <p>Local-first agents keep user data on the device and only sync what is needed.</p>
+                <p>The guide focuses on reliability, offline behavior, and predictable tool access.</p>
+                </main></body></html>
+                """,
+                "https://blog.example.com/post": """
+                <html><body><article>
+                <p>Practical local AI agents work best when search, fetch, and file tools stay small and explicit.</p>
+                <p>The article highlights grounded summaries instead of forcing users to inspect every URL manually.</p>
+                </article></body></html>
+                """,
+            },
         ),
     )
 
@@ -250,15 +262,88 @@ def test_search_tool_returns_compact_structured_results(
 
     assert result.success is True
     assert "Search query: local first agents" in result.output_text
+    assert "Sources considered: 2 | Sources read: 2 of 2 attempted" in result.output_text
+    assert "Summary:" in result.output_text
+    assert "Sources:" in result.output_text
     assert "1. Example Docs" in result.output_text
     assert "URL: https://example.com/docs" in result.output_text
-    assert (
-        "Snippet: Read the example documentation for local-first agents."
-        in result.output_text
-    )
-    assert "2. Agent Notes" in result.output_text
+    assert "Takeaway:" in result.output_text
+    assert "Snippet:" not in result.output_text
+    assert "Agent Notes" in result.output_text
     assert result.payload is not None
     assert result.payload["result_count"] == 2
+    assert result.payload["read_success_count"] == 2
+    assert result.payload["read_attempt_count"] == 2
+
+
+def test_search_tool_handles_partial_read_failures_gracefully(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    executor = ToolExecutor.with_default_tools(settings)
+
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools.socket.getaddrinfo",
+        lambda host, port, type=socket.SOCK_STREAM: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
+        ],
+    )
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools._open_request",
+        _build_search_open_request(
+            search_body="""
+            <html>
+              <body>
+                <div class="result">
+                  <a class="result__a" href="https://example.com/news">
+                    Example News
+                  </a>
+                  <div class="result__snippet">
+                    Example Corp published a shipping update.
+                  </div>
+                </div>
+                <div class="result">
+                  <a class="result__a" href="https://blog.example.com/post">
+                    Community Notes
+                  </a>
+                  <div class="result__snippet">
+                    Users are discussing what changed in the latest release.
+                  </div>
+                </div>
+              </body>
+            </html>
+            """,
+            page_bodies={
+                "https://example.com/news": """
+                <html><body><article>
+                <p>Example Corp says the latest release improves install reliability and startup speed.</p>
+                </article></body></html>
+                """,
+            },
+            page_errors={
+                "https://blog.example.com/post": URLError("timed out"),
+            },
+        ),
+    )
+
+    result = executor.execute(
+        ToolCall(
+            tool_name="search_web",
+            arguments={"query": "latest example release"},
+        )
+    )
+
+    assert result.success is True
+    assert "Sources considered: 2 | Sources read: 1 of 2 attempted" in result.output_text
+    assert "Summary:" in result.output_text
+    assert "I searched 2 public result(s), read 1 top source(s), and filled 1 gap(s) from search listings." in result.output_text
+    assert "Note: Users are discussing what changed in the latest release." in result.output_text
+    assert "Used the search snippet because the page read failed." in result.output_text
+    assert result.payload is not None
+    assert result.payload["read_success_count"] == 1
+    assert result.payload["read_attempt_count"] == 2
 
 
 def test_search_tool_reports_provider_failures_cleanly(
@@ -296,3 +381,36 @@ def _create_temp_project(tmp_path: Path) -> Path:
     project_root = tmp_path / "project"
     shutil.copytree(source_root / "config", project_root / "config")
     return project_root
+
+
+def _build_search_open_request(
+    *,
+    search_body: str,
+    page_bodies: dict[str, str],
+    page_errors: dict[str, Exception] | None = None,
+):
+    resolved_page_errors = page_errors or {}
+
+    def fake_open_request(
+        request,
+        timeout_seconds,
+        allow_private_networks,
+    ):  # type: ignore[no-untyped-def]
+        del timeout_seconds, allow_private_networks
+        if request.full_url.startswith("https://html.duckduckgo.com/html/"):
+            return _FakeResponse(
+                url=request.full_url,
+                body=search_body,
+                content_type="text/html",
+            )
+        if request.full_url in resolved_page_errors:
+            raise resolved_page_errors[request.full_url]
+        if request.full_url in page_bodies:
+            return _FakeResponse(
+                url=request.full_url,
+                body=page_bodies[request.full_url],
+                content_type="text/html",
+            )
+        raise AssertionError(f"Unexpected URL requested: {request.full_url}")
+
+    return fake_open_request

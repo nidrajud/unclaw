@@ -443,6 +443,11 @@ class TelegramBotChannel:
                 error=tool_result.error,
                 tool_duration_ms=_elapsed_ms(tool_started_at),
             )
+            _persist_tool_result(
+                session_manager=self.session_manager,
+                session_id=bound_session_id,
+                result=tool_result,
+            )
             reply_text = _format_tool_result(tool_result)
         elif result.should_exit:
             reply_text = "The Telegram bot keeps running. Use /help to see commands."
@@ -996,6 +1001,37 @@ def _format_tool_result(result: ToolResult) -> str:
     lines = result.output_text.splitlines() or [result.output_text]
     first_line, *other_lines = lines
     return "\n".join([f"Error: {first_line}", *other_lines])
+
+
+def _persist_tool_result(
+    *,
+    session_manager,
+    session_id: str,
+    result: ToolResult,
+) -> None:
+    add_message = getattr(session_manager, "add_message", None)
+    if not callable(add_message):
+        return
+    if not result.output_text.strip():
+        return
+
+    add_message(
+        MessageRole.TOOL,
+        _build_tool_history_content(result),
+        session_id=session_id,
+    )
+
+
+def _build_tool_history_content(result: ToolResult) -> str:
+    outcome = "success" if result.success else "error"
+    return "\n".join(
+        [
+            f"Tool: {result.tool_name}",
+            f"Outcome: {outcome}",
+            "",
+            result.output_text.strip(),
+        ]
+    )
 
 
 def _split_message_chunks(text: str, *, limit: int = _MESSAGE_LIMIT) -> list[str]:

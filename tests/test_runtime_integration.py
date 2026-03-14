@@ -120,7 +120,11 @@ def test_run_user_turn_persists_reply_and_emits_runtime_events(
         assert "Enabled built-in tools: 4" in provider_messages[1].content
         assert "/read <path>" in provider_messages[1].content
         assert "/fetch <url>" in provider_messages[1].content
-        assert "/search <query>" in provider_messages[1].content
+        assert (
+            "/search <query>: search the public web, read a few relevant pages, "
+            "and return a grounded summary with sources."
+            in provider_messages[1].content
+        )
         assert "Session memory and summary access." in provider_messages[1].content
         assert "no tools available" not in provider_messages[1].content.lower()
         assert provider_messages[-1].content == "Summarize this test run."
@@ -175,6 +179,98 @@ def test_runtime_capability_summary_reports_available_and_missing_capabilities()
     assert "Web search via /search <query>." in context
     assert "Session memory and summary access." in context
     assert "Do not claim you have no tool access" in context
+    assert "Do not say you cannot access it" in context
+
+
+def test_run_user_turn_includes_prior_tool_output_for_follow_up_questions(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    captured: dict[str, object] = {}
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+        ):
+            del profile, timeout_seconds, thinking_enabled, content_callback
+            captured["messages"] = list(messages)
+            return LLMResponse(
+                provider="ollama",
+                model_name="qwen3.5:4b",
+                content="Shorter recap.",
+                created_at="2026-03-13T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.TOOL,
+            (
+                "Tool: search_web\n"
+                "Outcome: success\n\n"
+                "Search query: latest news about Ollama\n"
+                "Summary:\n"
+                "- I searched 3 public results and read 2 top sources directly.\n"
+                "- Source A: Ollama shipped a new update.\n"
+            ),
+            session_id=session.id,
+        )
+        session_manager.add_message(
+            MessageRole.USER,
+            "Summarize that more briefly.",
+            session_id=session.id,
+        )
+
+        assistant_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Summarize that more briefly.",
+            tracer=tracer,
+        )
+
+        assert assistant_reply == "Shorter recap."
+        provider_messages = captured["messages"]
+        assert isinstance(provider_messages, list)
+        assert any(
+            message.role is LLMRole.TOOL and "Tool: search_web" in message.content
+            for message in provider_messages
+        )
+        assert provider_messages[-1].role is LLMRole.USER
+        assert provider_messages[-1].content == "Summarize that more briefly."
+        assert "Do not say you cannot access it" in provider_messages[1].content
+    finally:
+        session_manager.close()
 
 
 def test_run_user_turn_uses_configured_ollama_timeout(

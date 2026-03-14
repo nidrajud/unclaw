@@ -87,7 +87,9 @@ def build_runtime_capability_context(summary: RuntimeCapabilitySummary) -> str:
             ),
             (
                 "- If tool output is already present in the conversation, treat it "
-                "as retrieved context that you may summarize or analyze."
+                "as retrieved context that you may summarize, compare, extract, "
+                "or analyze. Do not say you cannot access it, and do not ask the "
+                "user to paste it again."
             ),
             (
                 "- If a capability is unavailable, say so clearly instead of "
@@ -107,7 +109,10 @@ def _build_available_tool_lines(summary: RuntimeCapabilitySummary) -> tuple[str,
     if summary.url_fetch_available:
         lines.append("/fetch <url>: fetch one public URL and extract text.")
     if summary.web_search_available:
-        lines.append("/search <query>: search the public web and return compact results.")
+        lines.append(
+            "/search <query>: search the public web, read a few relevant pages, "
+            "and return a grounded summary with sources."
+        )
     return tuple(lines)
 
 

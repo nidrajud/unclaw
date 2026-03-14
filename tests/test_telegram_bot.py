@@ -13,6 +13,7 @@ from unclaw.core.session_manager import SessionManager
 from unclaw.local_secrets import mask_telegram_bot_token
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
+from unclaw.schemas.chat import MessageRole
 from unclaw.settings import load_settings
 
 EXAMPLE_TELEGRAM_TOKEN = "123456789:AAExampleTelegramBotTokenValue"
@@ -511,6 +512,7 @@ def test_telegram_tool_traces_use_explicit_chat_session_id(
         tool_executor=SimpleNamespace(
             list_tools=lambda: [],
             execute=lambda _tool_call: SimpleNamespace(
+                tool_name="read_text_file",
                 success=True,
                 output_text="tool output",
                 error=None,
@@ -572,6 +574,84 @@ def test_telegram_tool_traces_use_explicit_chat_session_id(
     assert tool_finished["output_length"] == 11
     assert isinstance(tool_finished["tool_duration_ms"], int)
     assert bound_sessions == [(42, "chat-session-42")]
+
+
+def test_telegram_tool_results_are_persisted_for_follow_up_grounding(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path, allowed_chat_ids=[42])
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    api_client = FakeApiClient()
+    tracer = FakeTracer()
+
+    try:
+        session = session_manager.create_session(title="Telegram chat 42")
+        channel = telegram_bot.TelegramBotChannel(
+            settings=settings,
+            config=telegram_bot.TelegramConfig(
+                bot_token_env_var="TELEGRAM_BOT_TOKEN",
+                polling_timeout_seconds=30,
+                allowed_chat_ids=frozenset({42}),
+            ),
+            session_manager=session_manager,
+            memory_manager=SimpleNamespace(),
+            tracer=tracer,
+            tool_executor=SimpleNamespace(
+                list_tools=lambda: [],
+                execute=lambda _tool_call: SimpleNamespace(
+                    tool_name="search_web",
+                    success=True,
+                    output_text=(
+                        "Search query: latest news about Ollama\n"
+                        "Summary:\n"
+                        "- I searched 2 public result(s) and read 2 top source(s) directly.\n"
+                    ),
+                    error=None,
+                ),
+            ),
+            api_client=api_client,
+            session_store=SimpleNamespace(bind_chat=lambda **kwargs: None),
+        )
+
+        monkeypatch.setattr(
+            telegram_bot.TelegramBotChannel,
+            "_activate_chat_session",
+            lambda self, chat_id: session_manager.load_session(session.id),
+        )
+        monkeypatch.setattr(
+            telegram_bot.TelegramBotChannel,
+            "_get_command_handler",
+            lambda self, chat_id: SimpleNamespace(
+                handle=lambda _text: CommandResult(
+                    status=CommandStatus.OK,
+                    lines=(),
+                    tool_call=SimpleNamespace(
+                        tool_name="search_web",
+                        arguments={"query": "latest news about Ollama"},
+                    ),
+                )
+            ),
+        )
+
+        channel._handle_update(
+            {
+                "message": {
+                    "chat": {"id": 42},
+                    "date": 100,
+                    "text": "/search latest news about Ollama",
+                }
+            }
+        )
+
+        messages = session_manager.list_messages(session.id)
+        assert messages[-1].role is MessageRole.TOOL
+        assert "Tool: search_web" in messages[-1].content
+        assert "Outcome: success" in messages[-1].content
+        assert "Search query: latest news about Ollama" in messages[-1].content
+    finally:
+        session_manager.close()
 
 
 def test_telegram_command_result_session_id_overrides_global_current_session(
@@ -670,7 +750,10 @@ def _build_channel_for_settings(
     channel = telegram_bot.TelegramBotChannel(
         settings=settings,
         config=config,
-        session_manager=SimpleNamespace(current_session_id=None),
+        session_manager=SimpleNamespace(
+            current_session_id=None,
+            add_message=lambda *args, **kwargs: None,
+        ),
         memory_manager=SimpleNamespace(),
         tracer=tracer,
         tool_executor=SimpleNamespace(list_tools=lambda: []),
