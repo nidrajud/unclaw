@@ -719,7 +719,8 @@ def test_telegram_search_returns_a_natural_reply_and_persists_clean_tool_context
             MessageRole.ASSISTANT,
         ]
         assert messages[1].content.startswith("Tool: search_web\nOutcome: success\n")
-        assert "Findings:" in messages[1].content
+        assert "Grounding rules:" in messages[1].content
+        assert "Supported facts:" in messages[1].content
         assert "Search query:" not in messages[1].content
         assert "Evidence kept:" not in messages[1].content
         assert messages[2].content == api_client.sent_messages[0][1]

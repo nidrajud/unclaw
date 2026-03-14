@@ -1,0 +1,195 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  xmlns:xlink="http://www.w3.org/1999/xlink"
+  width="1100"
+  height="320"
+  viewBox="0 0 1100 320"
+  role="img"
+  aria-label="Animated UNCLAW ASCII logo"
+>
+  <defs>
+    <!-- Dégradé principal animé -->
+    <linearGradient id="logoGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#f5b9a0">
+        <animate attributeName="stop-color" values="#f5b9a0;#ffd8c8;#f5b9a0" dur="4s" repeatCount="indefinite"/>
+      </stop>
+      <stop offset="50%" stop-color="#ffffff">
+        <animate attributeName="stop-color" values="#ffffff;#f5b9a0;#ffffff" dur="4s" repeatCount="indefinite"/>
+      </stop>
+      <stop offset="100%" stop-color="#f5b9a0">
+        <animate attributeName="stop-color" values="#f5b9a0;#ffe9df;#f5b9a0" dur="4s" repeatCount="indefinite"/>
+      </stop>
+      <animateTransform
+        attributeName="gradientTransform"
+        type="translate"
+        values="-0.25 0;0.25 0;-0.25 0"
+        dur="6s"
+        repeatCount="indefinite"
+      />
+    </linearGradient>
+
+    <!-- Bande lumineuse qui passe -->
+    <linearGradient id="shimmer" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="rgba(255,255,255,0)"/>
+      <stop offset="45%" stop-color="rgba(255,255,255,0)"/>
+      <stop offset="50%" stop-color="rgba(255,255,255,0.95)"/>
+      <stop offset="55%" stop-color="rgba(255,255,255,0)"/>
+      <stop offset="100%" stop-color="rgba(255,255,255,0)"/>
+    </linearGradient>
+
+    <mask id="textMask">
+      <rect width="100%" height="100%" fill="black"/>
+      <g font-family="monospace" font-size="28" font-weight="700" xml:space="preserve" fill="white">
+        <text x="80" y="88">██╗   ██╗███╗   ██╗ ██████╗██╗      █████╗ ██╗    ██╗</text>
+        <text x="80" y="124">██║   ██║████╗  ██║██╔════╝██║     ██╔══██╗██║    ██║</text>
+        <text x="80" y="160">██║   ██║██╔██╗ ██║██║     ██║     ███████║██║ █╗ ██║</text>
+        <text x="80" y="196">██║   ██║██║╚██╗██║██║     ██║     ██╔══██║██║███╗██║</text>
+        <text x="80" y="232">╚██████╔╝██║ ╚████║╚██████╗███████╗██║  ██║╚███╔███╔╝</text>
+        <text x="80" y="268"> ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝</text>
+      </g>
+    </mask>
+
+    <!-- Glow doux -->
+    <filter id="softGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Ombre légère -->
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+
+    <!-- Animation de flottement -->
+    <style><![CDATA[
+      .logo-main {
+        animation: pulseGlow 3.4s ease-in-out infinite;
+      }
+
+      .logo-shadow {
+        opacity: 0.26;
+        animation: shadowPulse 3.4s ease-in-out infinite;
+      }
+
+      .spark {
+        opacity: 0;
+        animation: twinkle 2.8s infinite ease-in-out;
+      }
+
+      .spark.s1 { animation-delay: 0s; }
+      .spark.s2 { animation-delay: 0.4s; }
+      .spark.s3 { animation-delay: 0.8s; }
+      .spark.s4 { animation-delay: 1.2s; }
+      .spark.s5 { animation-delay: 1.6s; }
+      .spark.s6 { animation-delay: 2s; }
+
+      .scanline {
+        animation: scanMove 4.8s linear infinite;
+      }
+
+      .subtitle {
+        animation: subtitleFade 3s ease-in-out infinite;
+      }
+
+      @keyframes pulseGlow {
+        0%, 100% { opacity: 0.96; }
+        50% { opacity: 1; }
+      }
+
+      @keyframes shadowPulse {
+        0%, 100% { opacity: 0.18; }
+        50% { opacity: 0.34; }
+      }
+
+      @keyframes twinkle {
+        0%, 100% { opacity: 0; transform: translateY(0px) scale(0.85); }
+        20% { opacity: 0.9; transform: translateY(-2px) scale(1); }
+        50% { opacity: 0.4; transform: translateY(-4px) scale(1.08); }
+        80% { opacity: 0.85; transform: translateY(-2px) scale(1); }
+      }
+
+      @keyframes scanMove {
+        0%   { transform: translateX(-540px); opacity: 0; }
+        8%   { opacity: 0.0; }
+        15%  { opacity: 0.75; }
+        50%  { opacity: 0.85; }
+        85%  { opacity: 0.75; }
+        100% { transform: translateX(980px); opacity: 0; }
+      }
+
+      @keyframes subtitleFade {
+        0%, 100% { opacity: 0.65; }
+        50% { opacity: 1; }
+      }
+    ]]></style>
+  </defs>
+
+  <!-- Fond transparent -->
+  <rect width="100%" height="100%" fill="transparent"/>
+
+  <!-- Halo arrière -->
+  <rect x="40" y="28" width="1020" height="250" rx="24" fill="#f5b9a0" opacity="0.05"/>
+
+  <!-- Ombre du logo -->
+  <g class="logo-shadow" filter="url(#softGlow)">
+    <g font-family="monospace" font-size="28" font-weight="700" xml:space="preserve" fill="#f5b9a0">
+      <text x="84" y="92">██╗   ██╗███╗   ██╗ ██████╗██╗      █████╗ ██╗    ██╗</text>
+      <text x="84" y="128">██║   ██║████╗  ██║██╔════╝██║     ██╔══██╗██║    ██║</text>
+      <text x="84" y="164">██║   ██║██╔██╗ ██║██║     ██║     ███████║██║ █╗ ██║</text>
+      <text x="84" y="200">██║   ██║██║╚██╗██║██║     ██║     ██╔══██║██║███╗██║</text>
+      <text x="84" y="236">╚██████╔╝██║ ╚████║╚██████╗███████╗██║  ██║╚███╔███╔╝</text>
+      <text x="84" y="272"> ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝</text>
+    </g>
+  </g>
+
+  <!-- Logo principal -->
+  <g class="logo-main" filter="url(#shadow)">
+    <g font-family="monospace" font-size="28" font-weight="700" xml:space="preserve" fill="url(#logoGradient)">
+      <text x="80" y="88">██╗   ██╗███╗   ██╗ ██████╗██╗      █████╗ ██╗    ██╗</text>
+      <text x="80" y="124">██║   ██║████╗  ██║██╔════╝██║     ██╔══██╗██║    ██║</text>
+      <text x="80" y="160">██║   ██║██╔██╗ ██║██║     ██║     ███████║██║ █╗ ██║</text>
+      <text x="80" y="196">██║   ██║██║╚██╗██║██║     ██║     ██╔══██║██║███╗██║</text>
+      <text x="80" y="232">╚██████╔╝██║ ╚████║╚██████╗███████╗██║  ██║╚███╔███╔╝</text>
+      <text x="80" y="268"> ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝</text>
+    </g>
+  </g>
+
+  <!-- Balayage lumineux -->
+  <g mask="url(#textMask)" class="scanline">
+    <rect x="-220" y="40" width="220" height="250" fill="url(#shimmer)" transform="skewX(-18)"/>
+  </g>
+
+  <!-- Petites particules -->
+  <g fill="#f5b9a0">
+    <circle class="spark s1" cx="72" cy="52" r="2.4"/>
+    <circle class="spark s2" cx="1040" cy="54" r="2.2"/>
+    <circle class="spark s3" cx="58" cy="278" r="2.0"/>
+    <circle class="spark s4" cx="1060" cy="272" r="2.6"/>
+    <circle class="spark s5" cx="210" cy="26" r="1.8"/>
+    <circle class="spark s6" cx="915" cy="300" r="1.8"/>
+
+    <circle class="spark s3" cx="980" cy="112" r="1.6"/>
+    <circle class="spark s5" cx="140" cy="210" r="1.6"/>
+    <circle class="spark s2" cx="1015" cy="220" r="1.8"/>
+    <circle class="spark s1" cx="165" cy="105" r="1.4"/>
+  </g>
+
+  <!-- Sous-titre discret -->
+  <text
+    class="subtitle"
+    x="550"
+    y="304"
+    text-anchor="middle"
+    font-family="monospace"
+    font-size="14"
+    letter-spacing="2"
+    fill="#f5b9a0"
+    opacity="0.85"
+  >
+    LOCAL-FIRST AGENT RUNTIME
+  </text>
+</svg>

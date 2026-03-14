@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./unclaw-animated.svg" alt="Unclaw animated logo" />
+</p>
+
 # Unclaw 🦐
 
 **Local-first AI agent runtime for real local models.**  

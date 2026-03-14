@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import date
 
 from unclaw.core.capabilities import (
     RuntimeCapabilitySummary,
     build_runtime_capability_context,
+)
+from unclaw.core.search_grounding import (
+    build_search_answer_contract,
+    has_search_grounding_context,
 )
 from unclaw.core.session_manager import SessionManager
 from unclaw.llm.base import LLMMessage, LLMRole
@@ -37,6 +42,13 @@ def build_context_messages(
             LLMMessage(
                 role=LLMRole.SYSTEM,
                 content=build_runtime_capability_context(capability_summary),
+            )
+        )
+    if has_search_grounding_context(recent_history):
+        context_messages.append(
+            LLMMessage(
+                role=LLMRole.SYSTEM,
+                content=build_search_answer_contract(current_date=date.today()),
             )
         )
     context_messages.extend(_to_llm_message(message) for message in recent_history)

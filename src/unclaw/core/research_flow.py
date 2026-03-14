@@ -4,9 +4,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import date
 from time import perf_counter
 from typing import Any
 
+from unclaw.core.search_grounding import (
+    build_search_tool_history_summary,
+    shape_search_backed_reply,
+)
 from unclaw.core.runtime import (
     _EMPTY_RESPONSE_REPLY,
     _RUNTIME_ERROR_REPLY,
@@ -140,7 +145,12 @@ def run_search_then_answer(
         tracer=tracer,
         tool_registry=getattr(tool_executor, "registry", None),
         assistant_reply_transform=lambda reply: append_search_sources_section(
-            reply,
+            shape_search_backed_reply(
+                reply,
+                payload=tool_result.payload,
+                query=query,
+                current_date=date.today(),
+            ),
             payload=tool_result.payload,
         ),
     )
@@ -185,37 +195,44 @@ def _build_search_tool_history_content(
     ]
 
     body_lines: list[str] = []
-    if query:
-        body_lines.append(f"Search request: {query}")
-
     if result.success:
-        summary_points = _read_string_list(payload.get("summary_points"))
-        body_lines.extend(
-            [
-                "",
-                "Findings:",
-            ]
+        grounded_lines = build_search_tool_history_summary(
+            payload=payload,
+            query=query,
+            current_date=date.today(),
         )
-        if summary_points:
-            body_lines.extend(f"- {point}" for point in summary_points)
+        if grounded_lines:
+            body_lines.extend(["", *grounded_lines])
         else:
-            body_lines.append(f"- {_NO_FINDINGS_REPLY}")
-
-        sources = _extract_search_sources(payload)
-        if sources:
+            summary_points = _read_string_list(payload.get("summary_points"))
             body_lines.extend(
                 [
                     "",
-                    "Sources:",
+                    "Findings:",
                 ]
             )
-            for title, url in sources:
-                if title:
-                    body_lines.append(f"- {title}: {url}")
-                else:
-                    body_lines.append(f"- {url}")
+            if summary_points:
+                body_lines.extend(f"- {point}" for point in summary_points)
+            else:
+                body_lines.append(f"- {_NO_FINDINGS_REPLY}")
+
+            sources = _extract_search_sources(payload)
+            if sources:
+                body_lines.extend(
+                    [
+                        "",
+                        "Sources:",
+                    ]
+                )
+                for title, url in sources:
+                    if title:
+                        body_lines.append(f"- {title}: {url}")
+                    else:
+                        body_lines.append(f"- {url}")
     else:
         error_text = result.error or result.output_text.strip()
+        if query:
+            body_lines.append(f"Search request: {query}")
         if error_text:
             if body_lines:
                 body_lines.append("")

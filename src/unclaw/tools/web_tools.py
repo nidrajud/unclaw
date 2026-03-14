@@ -2712,22 +2712,74 @@ def _select_output_sources(
     if not sources:
         return ()
 
-    finding_urls = {
-        _canonicalize_url(url) or url
-        for finding in synthesis.findings
-        for url in finding.source_urls
-    }
-    if not finding_urls:
-        return sources
+    finding_weight_by_url: dict[str, float] = {}
+    for finding in synthesis.findings:
+        base_weight = finding.score + finding.support_count * 2.0
+        for position, url in enumerate(finding.source_urls):
+            canonical_url = _canonicalize_url(url) or url
+            finding_weight_by_url[canonical_url] = (
+                finding_weight_by_url.get(canonical_url, 0.0)
+                + max(base_weight - position * 0.5, 0.5)
+            )
 
-    selected_sources = tuple(
+    candidate_sources = tuple(
         source
         for source in sources
-        if (_canonicalize_url(source.url) or source.url) in finding_urls
+        if (_canonicalize_url(source.url) or source.url) in finding_weight_by_url
     )
-    if selected_sources:
-        return selected_sources
-    return sources
+    if not candidate_sources:
+        candidate_sources = sources
+
+    ranked_sources = tuple(
+        sorted(
+            candidate_sources,
+            key=lambda source: (
+                -_output_source_priority(
+                    source=source,
+                    finding_weight_by_url=finding_weight_by_url,
+                ),
+                source.depth,
+                source.title.casefold(),
+                source.url,
+            ),
+        )
+    )
+    return ranked_sources[:_MAX_OUTPUT_SOURCES]
+
+
+def _output_source_priority(
+    *,
+    source: _RetrievedSource,
+    finding_weight_by_url: Mapping[str, float],
+) -> float:
+    canonical_url = _canonicalize_url(source.url) or source.url
+    priority = finding_weight_by_url.get(canonical_url, 0.0) * 4.0
+    priority += source.usefulness
+    priority += source.evidence_count * 2.0
+    if source.fetched:
+        priority += 0.75
+    if not source.used_snippet_fallback:
+        priority += 0.5
+    if _url_looks_article_like(source.url):
+        priority += 0.5
+    if _url_looks_homepage_like(source.url):
+        priority -= 3.0
+    if _looks_generic_result_title(
+        title=source.title,
+        hostname=urlparse(source.url).hostname or "",
+    ):
+        priority -= 2.0
+    if _source_title_looks_weak(source.title):
+        priority -= 1.25
+    return priority
+
+
+def _source_title_looks_weak(title: str) -> bool:
+    folded_title = _fold_for_match(title)
+    return any(
+        token in folded_title
+        for token in ("podcast", "episode", "newsletter", "substack", "roundup")
+    )
 
 
 def _link_text_looks_generic(text: str) -> bool:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+from datetime import date as real_date
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,7 +12,7 @@ from unclaw.core.capabilities import (
     build_runtime_capability_summary,
 )
 from unclaw.core.command_handler import CommandHandler
-from unclaw.core.research_flow import run_search_then_answer
+from unclaw.core.research_flow import build_tool_history_content, run_search_then_answer
 from unclaw.core.runtime import run_user_turn
 from unclaw.core.session_manager import SessionManager
 from unclaw.llm.base import LLMMessage, LLMResponse, LLMRole
@@ -391,7 +392,8 @@ def test_run_search_then_answer_grounds_a_natural_reply_and_preserves_follow_up_
         assert stored_messages[0].content == "latest news about Ollama"
         assert "Search query:" not in stored_messages[1].content
         assert "Evidence kept:" not in stored_messages[1].content
-        assert "Findings:" in stored_messages[1].content
+        assert "Grounding rules:" in stored_messages[1].content
+        assert "Supported facts:" in stored_messages[1].content
         assert "Sources:" in stored_messages[1].content
 
         search_turn_messages = captured_messages[0]
@@ -429,6 +431,753 @@ def test_run_search_then_answer_grounds_a_natural_reply_and_preserves_follow_up_
             and "Ollama Blog: https://ollama.com/blog/search-update" in message.content
             for message in follow_up_messages
         )
+        assert any(
+            message.role is LLMRole.SYSTEM
+            and "Search-backed answer contract:" in message.content
+            for message in follow_up_messages
+        )
+    finally:
+        session_manager.close()
+
+
+def test_run_search_then_answer_removes_stale_relative_dates_from_search_backed_replies(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    _freeze_search_grounding_date(monkeypatch)
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+        ):
+            del profile, messages, timeout_seconds, thinking_enabled, content_callback
+            return LLMResponse(
+                provider="ollama",
+                model_name="qwen3.5:4b",
+                content=(
+                    "Alex Rivera was born on 1998-05-04 and, as of May 2024, "
+                    "is 26 years old."
+                ),
+                created_at="2026-03-13T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    search_tool_result = ToolResult.ok(
+        tool_name="search_web",
+        output_text="Search query: how old is Alex Rivera\n",
+        payload={
+            "query": "how old is Alex Rivera",
+            "summary_points": ["Alex Rivera was born on 1998-05-04."],
+            "display_sources": [
+                {
+                    "title": "Official Bio",
+                    "url": "https://alex.example.com/bio",
+                },
+                {
+                    "title": "Magazine Interview",
+                    "url": "https://press.example.com/alex-rivera-interview",
+                },
+            ],
+            "synthesized_findings": [
+                {
+                    "text": "Alex Rivera was born on 1998-05-04.",
+                    "score": 7.8,
+                    "support_count": 2,
+                    "source_titles": ["Official Bio", "Magazine Interview"],
+                    "source_urls": [
+                        "https://alex.example.com/bio",
+                        "https://press.example.com/alex-rivera-interview",
+                    ],
+                }
+            ],
+            "results": [
+                {
+                    "title": "Official Bio",
+                    "url": "https://alex.example.com/bio",
+                    "takeaway": "Official biography page.",
+                    "depth": 1,
+                    "fetched": True,
+                    "evidence_count": 1,
+                    "fetch_error": None,
+                    "used_snippet_fallback": False,
+                    "usefulness": 9.0,
+                },
+                {
+                    "title": "Magazine Interview",
+                    "url": "https://press.example.com/alex-rivera-interview",
+                    "takeaway": "Interview confirming the birth date.",
+                    "depth": 1,
+                    "fetched": True,
+                    "evidence_count": 1,
+                    "fetch_error": None,
+                    "used_snippet_fallback": False,
+                    "usefulness": 7.5,
+                },
+            ],
+            "evidence": [
+                {
+                    "text": "Alex Rivera was born on 1998-05-04.",
+                    "url": "https://alex.example.com/bio",
+                    "source_title": "Official Bio",
+                    "score": 7.8,
+                    "depth": 1,
+                    "query_relevance": 4.0,
+                    "evidence_quality": 4.0,
+                    "novelty": 1.0,
+                    "supporting_urls": [
+                        "https://alex.example.com/bio",
+                        "https://press.example.com/alex-rivera-interview",
+                    ],
+                    "supporting_titles": [
+                        "Official Bio",
+                        "Magazine Interview",
+                    ],
+                }
+            ],
+        },
+    )
+
+    try:
+        reply = run_search_then_answer(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            tracer=tracer,
+            tool_executor=SimpleNamespace(
+                execute=lambda _tool_call: search_tool_result,
+                registry=ToolRegistry(),
+            ),
+            tool_call=SimpleNamespace(
+                tool_name="search_web",
+                arguments={"query": "how old is Alex Rivera"},
+            ),
+        ).assistant_reply
+
+        assert "as of May 2024" not in reply
+        assert "I found a birth date of 1998-05-04." in reply
+        assert "On 2026-03-14, that makes them 27 years old." in reply
+        assert reply.endswith(
+            "- Magazine Interview: https://press.example.com/alex-rivera-interview"
+        )
+    finally:
+        session_manager.close()
+
+
+def test_run_search_then_answer_does_not_confirm_weak_usernames(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+        ):
+            del profile, messages, timeout_seconds, thinking_enabled, content_callback
+            return LLMResponse(
+                provider="ollama",
+                model_name="qwen3.5:4b",
+                content=(
+                    "Jordan Lee is a product designer and engineer. "
+                    "Their Instagram is probably @jordancode."
+                ),
+                created_at="2026-03-13T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    search_tool_result = ToolResult.ok(
+        tool_name="search_web",
+        output_text="Search query: who is Jordan Lee\n",
+        payload={
+            "query": "who is Jordan Lee",
+            "summary_points": [
+                "Jordan Lee is a product designer and engineer.",
+                "One profile lists the handle @jordancode.",
+            ],
+            "display_sources": [
+                {
+                    "title": "Company Bio",
+                    "url": "https://company.example.com/jordan-lee",
+                },
+                {
+                    "title": "Guest Q&A",
+                    "url": "https://community.example.com/jordan-qa",
+                },
+            ],
+            "synthesized_findings": [
+                {
+                    "text": "Jordan Lee is a product designer and engineer.",
+                    "score": 8.1,
+                    "support_count": 2,
+                    "source_titles": ["Company Bio", "Guest Q&A"],
+                    "source_urls": [
+                        "https://company.example.com/jordan-lee",
+                        "https://community.example.com/jordan-qa",
+                    ],
+                },
+                {
+                    "text": "One profile lists the handle @jordancode.",
+                    "score": 4.2,
+                    "support_count": 1,
+                    "source_titles": ["Guest Q&A"],
+                    "source_urls": ["https://community.example.com/jordan-qa"],
+                },
+            ],
+            "results": [
+                {
+                    "title": "Company Bio",
+                    "url": "https://company.example.com/jordan-lee",
+                    "takeaway": "Official bio page.",
+                    "depth": 1,
+                    "fetched": True,
+                    "evidence_count": 1,
+                    "fetch_error": None,
+                    "used_snippet_fallback": False,
+                    "usefulness": 9.0,
+                },
+                {
+                    "title": "Guest Q&A",
+                    "url": "https://community.example.com/jordan-qa",
+                    "takeaway": "Community interview with one social handle mention.",
+                    "depth": 1,
+                    "fetched": True,
+                    "evidence_count": 1,
+                    "fetch_error": None,
+                    "used_snippet_fallback": False,
+                    "usefulness": 5.0,
+                },
+            ],
+        },
+    )
+
+    try:
+        reply = run_search_then_answer(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            tracer=tracer,
+            tool_executor=SimpleNamespace(
+                execute=lambda _tool_call: search_tool_result,
+                registry=ToolRegistry(),
+            ),
+            tool_call=SimpleNamespace(
+                tool_name="search_web",
+                arguments={"query": "who is Jordan Lee"},
+            ),
+        ).assistant_reply
+
+        assert "Jordan Lee is a product designer and engineer." in reply
+        assert "@jordancode" not in reply
+        assert "not consistently confirmed" in reply
+    finally:
+        session_manager.close()
+
+
+def test_run_search_then_answer_person_summary_prefers_supported_identity_over_fluff(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+        ):
+            del profile, messages, timeout_seconds, thinking_enabled, content_callback
+            return LLMResponse(
+                provider="ollama",
+                model_name="qwen3.5:4b",
+                content=(
+                    "Taylor Stone seems to be an inspiring creator who often shows up "
+                    "on podcasts and blogs."
+                ),
+                created_at="2026-03-13T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    search_tool_result = ToolResult.ok(
+        tool_name="search_web",
+        output_text="Search query: tell me everything you know about Taylor Stone\n",
+        payload={
+            "query": "tell me everything you know about Taylor Stone",
+            "summary_points": [
+                "Taylor Stone is a robotics researcher and startup founder.",
+                "She created the River Hand open-source prosthetics project.",
+                "She has appeared on a few podcasts about creativity.",
+            ],
+            "display_sources": [
+                {
+                    "title": "Lab Bio",
+                    "url": "https://lab.example.com/taylor-stone",
+                },
+                {
+                    "title": "Project Page",
+                    "url": "https://riverhand.example.com/about",
+                },
+            ],
+            "synthesized_findings": [
+                {
+                    "text": "Taylor Stone is a robotics researcher and startup founder.",
+                    "score": 8.5,
+                    "support_count": 2,
+                    "source_titles": ["Lab Bio", "Project Page"],
+                    "source_urls": [
+                        "https://lab.example.com/taylor-stone",
+                        "https://riverhand.example.com/about",
+                    ],
+                },
+                {
+                    "text": "She created the River Hand open-source prosthetics project.",
+                    "score": 7.4,
+                    "support_count": 2,
+                    "source_titles": ["Project Page", "Lab Bio"],
+                    "source_urls": [
+                        "https://riverhand.example.com/about",
+                        "https://lab.example.com/taylor-stone",
+                    ],
+                },
+                {
+                    "text": "She has appeared on a few podcasts about creativity.",
+                    "score": 4.0,
+                    "support_count": 1,
+                    "source_titles": ["Guest Podcast"],
+                    "source_urls": ["https://podcasts.example.com/taylor-stone"],
+                },
+            ],
+            "results": [
+                {
+                    "title": "Lab Bio",
+                    "url": "https://lab.example.com/taylor-stone",
+                    "takeaway": "Institutional biography page.",
+                    "depth": 1,
+                    "fetched": True,
+                    "evidence_count": 1,
+                    "fetch_error": None,
+                    "used_snippet_fallback": False,
+                    "usefulness": 8.8,
+                },
+                {
+                    "title": "Project Page",
+                    "url": "https://riverhand.example.com/about",
+                    "takeaway": "Official project description.",
+                    "depth": 1,
+                    "fetched": True,
+                    "evidence_count": 1,
+                    "fetch_error": None,
+                    "used_snippet_fallback": False,
+                    "usefulness": 8.1,
+                },
+                {
+                    "title": "Guest Podcast",
+                    "url": "https://podcasts.example.com/taylor-stone",
+                    "takeaway": "Podcast appearance.",
+                    "depth": 1,
+                    "fetched": True,
+                    "evidence_count": 1,
+                    "fetch_error": None,
+                    "used_snippet_fallback": False,
+                    "usefulness": 3.8,
+                },
+            ],
+        },
+    )
+
+    try:
+        reply = run_search_then_answer(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            tracer=tracer,
+            tool_executor=SimpleNamespace(
+                execute=lambda _tool_call: search_tool_result,
+                registry=ToolRegistry(),
+            ),
+            tool_call=SimpleNamespace(
+                tool_name="search_web",
+                arguments={
+                    "query": "tell me everything you know about Taylor Stone"
+                },
+            ),
+        ).assistant_reply
+
+        assert "Taylor Stone is a robotics researcher and startup founder." in reply
+        assert "She created the River Hand open-source prosthetics project." in reply
+        assert "inspiring" not in reply
+        assert "podcast" not in reply.lower().split("Sources:")[0]
+    finally:
+        session_manager.close()
+
+
+def test_run_search_then_answer_omits_unconfirmed_achievements_and_keeps_compact_sources(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+        ):
+            del profile, messages, timeout_seconds, thinking_enabled, content_callback
+            return LLMResponse(
+                provider="ollama",
+                model_name="qwen3.5:4b",
+                content=(
+                    "Pat Kim leads a major AI lab and won a national innovation prize."
+                ),
+                created_at="2026-03-13T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    search_tool_result = ToolResult.ok(
+        tool_name="search_web",
+        output_text="Search query: what has Pat Kim done\n",
+        payload={
+            "query": "what has Pat Kim done",
+            "summary_points": [
+                "Pat Kim leads the Applied Systems Lab.",
+                "One blog says Pat Kim won a national innovation prize.",
+            ],
+            "display_sources": [
+                {
+                    "title": "Applied Systems Lab",
+                    "url": "https://lab.example.com/pat-kim",
+                },
+                {
+                    "title": "Conference Program",
+                    "url": "https://conference.example.com/speakers/pat-kim",
+                },
+            ],
+            "synthesized_findings": [
+                {
+                    "text": "Pat Kim leads the Applied Systems Lab.",
+                    "score": 7.3,
+                    "support_count": 2,
+                    "source_titles": ["Applied Systems Lab", "Conference Program"],
+                    "source_urls": [
+                        "https://lab.example.com/pat-kim",
+                        "https://conference.example.com/speakers/pat-kim",
+                    ],
+                },
+                {
+                    "text": "One blog says Pat Kim won a national innovation prize.",
+                    "score": 3.7,
+                    "support_count": 1,
+                    "source_titles": ["Personal Blog"],
+                    "source_urls": ["https://blog.example.com/pat-kim-profile"],
+                },
+            ],
+            "results": [
+                {
+                    "title": "Applied Systems Lab",
+                    "url": "https://lab.example.com/pat-kim",
+                    "takeaway": "Official lab profile.",
+                    "depth": 1,
+                    "fetched": True,
+                    "evidence_count": 1,
+                    "fetch_error": None,
+                    "used_snippet_fallback": False,
+                    "usefulness": 9.0,
+                },
+                {
+                    "title": "Conference Program",
+                    "url": "https://conference.example.com/speakers/pat-kim",
+                    "takeaway": "Conference speaker listing.",
+                    "depth": 1,
+                    "fetched": True,
+                    "evidence_count": 1,
+                    "fetch_error": None,
+                    "used_snippet_fallback": False,
+                    "usefulness": 7.2,
+                },
+                {
+                    "title": "Personal Blog",
+                    "url": "https://blog.example.com/pat-kim-profile",
+                    "takeaway": "One blog post with an award claim.",
+                    "depth": 1,
+                    "fetched": True,
+                    "evidence_count": 1,
+                    "fetch_error": None,
+                    "used_snippet_fallback": False,
+                    "usefulness": 3.2,
+                },
+            ],
+        },
+    )
+
+    try:
+        reply = run_search_then_answer(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            tracer=tracer,
+            tool_executor=SimpleNamespace(
+                execute=lambda _tool_call: search_tool_result,
+                registry=ToolRegistry(),
+            ),
+            tool_call=SimpleNamespace(
+                tool_name="search_web",
+                arguments={"query": "what has Pat Kim done"},
+            ),
+        ).assistant_reply
+
+        answer_body, sources_block = reply.split("\n\nSources:\n", maxsplit=1)
+        assert "Pat Kim leads the Applied Systems Lab." in answer_body
+        assert "national innovation prize" not in answer_body
+        assert "Sources:\n" not in sources_block
+        assert all(line.startswith("- ") and ": https://" in line for line in sources_block.splitlines())
+        assert all("takeaway" not in line.casefold() for line in sources_block.splitlines())
+    finally:
+        session_manager.close()
+
+
+def test_run_user_turn_keeps_follow_up_turns_grounded_after_search(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    captured_messages: list[LLMMessage] = []
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+        ):
+            del profile, timeout_seconds, thinking_enabled, content_callback
+            captured_messages.extend(messages)
+            assert any(
+                message.role is LLMRole.SYSTEM
+                and "Search-backed answer contract:" in message.content
+                for message in messages
+            )
+            return LLMResponse(
+                provider="ollama",
+                model_name="qwen3.5:4b",
+                content=(
+                    "Jordan Lee is a product designer and engineer. "
+                    "I couldn't confirm a social handle across the retrieved sources."
+                ),
+                created_at="2026-03-13T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+    _freeze_search_grounding_date(monkeypatch)
+
+    tool_result = ToolResult.ok(
+        tool_name="search_web",
+        output_text="Search query: who is Jordan Lee\n",
+        payload={
+            "query": "who is Jordan Lee",
+            "summary_points": [
+                "Jordan Lee is a product designer and engineer.",
+                "One profile lists the handle @jordancode.",
+            ],
+            "display_sources": [
+                {
+                    "title": "Company Bio",
+                    "url": "https://company.example.com/jordan-lee",
+                },
+            ],
+            "synthesized_findings": [
+                {
+                    "text": "Jordan Lee is a product designer and engineer.",
+                    "score": 8.1,
+                    "support_count": 2,
+                    "source_titles": ["Company Bio"],
+                    "source_urls": ["https://company.example.com/jordan-lee"],
+                },
+                {
+                    "text": "One profile lists the handle @jordancode.",
+                    "score": 4.2,
+                    "support_count": 1,
+                    "source_titles": ["Community Q&A"],
+                    "source_urls": ["https://community.example.com/jordan-qa"],
+                },
+            ],
+        },
+    )
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.TOOL,
+            build_tool_history_content(
+                tool_result,
+                tool_call=SimpleNamespace(
+                    tool_name="search_web",
+                    arguments={"query": "who is Jordan Lee"},
+                ),
+            ),
+            session_id=session.id,
+        )
+        session_manager.add_message(
+            MessageRole.USER,
+            "Summarize that more briefly.",
+            session_id=session.id,
+        )
+
+        assistant_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Summarize that more briefly.",
+            tracer=tracer,
+        )
+
+        assert assistant_reply == (
+            "Jordan Lee is a product designer and engineer. "
+            "I couldn't confirm a social handle across the retrieved sources."
+        )
+        tool_messages = [
+            message.content
+            for message in captured_messages
+            if message.role is LLMRole.TOOL
+        ]
+        assert len(tool_messages) == 1
+        assert "Grounding rules:" in tool_messages[0]
+        assert "Supported facts:" in tool_messages[0]
+        assert "Uncertain details:" in tool_messages[0]
+        assert "Sources fetched:" not in tool_messages[0]
     finally:
         session_manager.close()
 
@@ -520,3 +1269,14 @@ def _create_temp_project(tmp_path: Path) -> Path:
     project_root = tmp_path / "project"
     shutil.copytree(source_root / "config", project_root / "config")
     return project_root
+
+
+def _freeze_search_grounding_date(monkeypatch) -> None:
+    class FixedDate(real_date):
+        @classmethod
+        def today(cls) -> FixedDate:
+            return cls(2026, 3, 14)
+
+    monkeypatch.setattr("unclaw.core.context_builder.date", FixedDate)
+    monkeypatch.setattr("unclaw.core.research_flow.date", FixedDate)
+    monkeypatch.setattr("unclaw.core.search_grounding.date", FixedDate)
