@@ -213,7 +213,7 @@ def build_startup_report(
                 status=CheckStatus.INFO,
                 label="Models",
                 detail="Model availability will be checked once Ollama is running.",
-                guidance="Run `unclaw onboard` for guided setup.",
+                guidance="Run `unclaw onboard` for guided local setup.",
             )
         )
 
@@ -365,7 +365,7 @@ def _build_channel_check(*, channel_name: str, channel_enabled: bool) -> Startup
         status=CheckStatus.ERROR,
         label=label,
         detail=f"{label} channel is disabled in config/app.yaml.",
-        guidance="Run `unclaw onboard` to enable it.",
+        guidance="Run `unclaw onboard` for guided local setup.",
     )
 
 
@@ -386,7 +386,7 @@ def _build_ollama_checks(ollama_status: OllamaStatus) -> tuple[StartupCheck, ...
                 status=CheckStatus.ERROR,
                 label="Ollama",
                 detail="Ollama is installed but the local server is not running.",
-                guidance="Start it with `ollama serve`, or run `unclaw onboard` for help.",
+                guidance="Start it with `ollama serve`, or run `unclaw onboard` for guided local setup.",
             ),
         )
 
@@ -421,7 +421,7 @@ def _build_required_model_checks(
                 status=CheckStatus.ERROR,
                 label="Models",
                 detail=f"Required local model profiles are missing: {missing_text}.",
-                guidance="Pull them with `ollama pull <model>`, or run `unclaw onboard`.",
+                guidance="Pull them with `ollama pull <model>`, or run `unclaw onboard` for guided local setup.",
             ),
         )
 
@@ -455,7 +455,7 @@ def _build_optional_model_checks(
             status=CheckStatus.WARN,
             label="Extra models",
             detail=f"Some optional configured profiles are missing: {missing_text}.",
-            guidance="You can still start Unclaw, then pull them later or rerun onboarding.",
+            guidance="You can keep using Unclaw, then pull them later or rerun onboarding.",
         ),
     )
 
@@ -520,10 +520,7 @@ def _build_telegram_access_check(
     return StartupCheck(
         status=CheckStatus.WARN,
         label="Telegram access",
-        detail=(
-            "Secure deny-by-default mode is active. "
-            "`allowed_chat_ids: []` means no Telegram chats are authorized yet."
-        ),
+        detail="Secure by default: no Telegram chats are authorized yet (`allowed_chat_ids: []`).",
         guidance=(
             "Send one message to the bot, then run `unclaw telegram allow-latest` "
             "or `unclaw telegram allow <chat_id>` on this machine."

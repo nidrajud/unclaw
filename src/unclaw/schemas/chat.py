@@ -24,21 +24,3 @@ class ChatMessage:
     role: MessageRole
     content: str
     created_at: str
-
-
-@dataclass(frozen=True, slots=True)
-class UserRequest:
-    """One user turn entering the runtime."""
-
-    session_id: str
-    content: str
-    created_at: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class AssistantResponse:
-    """One assistant turn returned by the runtime."""
-
-    session_id: str
-    content: str
-    created_at: str | None = None

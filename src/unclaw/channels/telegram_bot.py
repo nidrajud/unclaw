@@ -894,20 +894,6 @@ def _write_allowed_chat_ids(
     return True
 
 
-def _read_bool(
-    payload: dict[str, Any],
-    key: str,
-    *,
-    default: bool | None = None,
-) -> bool:
-    value = payload.get(key, default)
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        raise ConfigurationError(f"Missing Telegram setting '{key}'.")
-    raise ConfigurationError(f"Telegram setting '{key}' must be a boolean.")
-
-
 def _read_str(payload: dict[str, Any], key: str) -> str:
     value = payload.get(key)
     if not isinstance(value, str) or not value.strip():
@@ -1052,7 +1038,7 @@ def _print_authorized_chat_list(
     latest_rejected_chat_id: int | None,
 ) -> None:
     if not allowed_chat_ids:
-        print("No Telegram chats are authorized. Deny-by-default is active.")
+        print("No Telegram chats are authorized yet. Secure deny-by-default mode is active.")
     else:
         print("Authorized Telegram chats:")
         for chat_id in sorted(allowed_chat_ids):
@@ -1062,11 +1048,11 @@ def _print_authorized_chat_list(
         print(f"Latest rejected chat: {latest_rejected_chat_id}")
         print(
             "Authorize it with `unclaw telegram allow-latest` "
-            f"or `unclaw telegram allow {latest_rejected_chat_id}`."
+            f"or `unclaw telegram allow {latest_rejected_chat_id}` on this machine."
         )
     else:
         print(
-            "Tip: send one message to your bot, then use "
+            "Tip: send one message to the bot, then run "
             "`unclaw telegram allow-latest` on this machine."
         )
 
@@ -1080,7 +1066,7 @@ def _format_authorized_chat_count(allowed_chat_ids: tuple[int, ...]) -> str:
 def _build_unauthorized_chat_message(chat_id: int) -> str:
     return (
         "This chat is not authorized yet for this Unclaw bot.\n\n"
-        "On the server machine, run:\n"
+        "On the machine running Unclaw, run:\n"
         f"unclaw telegram allow {chat_id}\n"
         "or:\n"
         "unclaw telegram allow-latest\n\n"

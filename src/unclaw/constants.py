@@ -4,6 +4,7 @@ APP_NAME = "unclaw"
 DISPLAY_NAME = "Unclaw"
 
 CONFIG_DIRECTORY_NAME = "config"
+PROMPTS_DIRECTORY_NAME = "prompts"
 DATA_DIRECTORY_NAME = "data"
 LOGS_DIRECTORY_NAME = "logs"
 SESSIONS_DIRECTORY_NAME = "sessions"
@@ -12,6 +13,7 @@ FILES_DIRECTORY_NAME = "files"
 
 APP_CONFIG_FILE_NAME = "app.yaml"
 MODELS_CONFIG_FILE_NAME = "models.yaml"
+SYSTEM_PROMPT_FILE_NAME = "system.txt"
 DATABASE_FILE_NAME = "app.db"
 LOG_FILE_NAME = "runtime.log"
 

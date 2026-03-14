@@ -660,7 +660,7 @@ def run_onboarding(
         _build_onboarding_banner(settings=settings, ollama_status=ollama_status)
     )
     output_func("Welcome to Unclaw setup.")
-    output_func("This guide updates local files in this project only.")
+    output_func("This guide only updates local files in this project.")
     output_func("Your models, chats, and secrets stay on your machine.")
     if prompt_ui.interactive:
         output_func("Use arrow keys to move, Enter to confirm, and Ctrl-C to cancel.")
@@ -1302,7 +1302,7 @@ def _prompt_telegram_bot_token(
         "Secure by default: `allowed_chat_ids: []` denies all Telegram chats until you authorize one explicitly."
     )
     prompt_ui.info(
-        "Advanced fallback: `unclaw telegram` can still read "
+        "Advanced fallback: the Telegram channel can still read "
         f"`{DEFAULT_TELEGRAM_TOKEN_ENV_VAR}` from the environment."
     )
 

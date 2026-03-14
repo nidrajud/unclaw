@@ -8,11 +8,6 @@ from unclaw.core.session_manager import SessionManager
 from unclaw.llm.base import LLMMessage, LLMRole
 from unclaw.schemas.chat import ChatMessage, MessageRole
 
-_SYSTEM_PROMPT = (
-    "You are Unclaw, a local-first AI assistant. "
-    "Answer clearly, directly, and practically."
-)
-
 
 def build_context_messages(
     *,
@@ -29,7 +24,9 @@ def build_context_messages(
     history = session_manager.list_messages(session_id)
     recent_history = _limit_history(history, max_history_size)
 
-    context_messages = [LLMMessage(role=LLMRole.SYSTEM, content=_SYSTEM_PROMPT)]
+    context_messages = [
+        LLMMessage(role=LLMRole.SYSTEM, content=session_manager.settings.system_prompt)
+    ]
     context_messages.extend(_to_llm_message(message) for message in recent_history)
 
     if _should_append_current_user_message(recent_history, normalized_user_message):
@@ -67,4 +64,3 @@ def _should_append_current_user_message(
         return True
 
     return latest_message.content.strip() != user_message
-

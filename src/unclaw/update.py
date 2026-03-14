@@ -11,6 +11,14 @@ from unclaw.errors import ConfigurationError
 from unclaw.settings import resolve_project_root
 
 OutputFunc = Callable[[str], None]
+_UNSUPPORTED_GIT_STATE_MESSAGE = (
+    "This checkout is in an unsupported git state for `unclaw update`. "
+    "Run `git status`, resolve that state manually, then rerun `unclaw update`."
+)
+_DIVERGENCE_ERROR_MESSAGE = (
+    "Could not determine local and remote branch divergence safely. "
+    "Run `git fetch --prune` and `git status`, then update manually if needed."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,11 +59,12 @@ def run_update(
             output_func(f"This folder is not a git checkout: {target_root}")
             return 1
 
+        _ensure_no_in_progress_git_operation(repo_root)
         branch_name = _current_branch_name(repo_root)
         if branch_name is None:
             output_func(f"Repository: {repo_root}")
             output_func(
-                "Cannot update automatically from a detached HEAD. Check out a branch and rerun `unclaw update`."
+                "Cannot run `unclaw update` from a detached HEAD. Check out a branch, then rerun `unclaw update`."
             )
             return 1
 
@@ -64,7 +73,7 @@ def run_update(
             output_func(f"Repository: {repo_root}")
             output_func(f"Branch: {branch_name}")
             output_func(
-                "This branch has no upstream tracking branch. Set one with `git branch --set-upstream-to <remote>/<branch>` and rerun `unclaw update`."
+                "This branch has no upstream tracking branch. Set one with `git branch --set-upstream-to <remote>/<branch>`, then rerun `unclaw update`."
             )
             return 1
 
@@ -158,7 +167,7 @@ def _git_repo_root(path: Path) -> Path | None:
         return None
     root_text = _read_single_output_line(
         result.stdout,
-        error_message="This checkout is in an unsupported git state for automatic update.",
+        error_message=_UNSUPPORTED_GIT_STATE_MESSAGE,
     )
     if not root_text:
         return None
@@ -171,7 +180,7 @@ def _current_branch_name(repo_root: Path) -> str | None:
         return None
     branch_name = _read_single_output_line(
         result.stdout,
-        error_message="This checkout is in an unsupported git state for automatic update.",
+        error_message=_UNSUPPORTED_GIT_STATE_MESSAGE,
     )
     if not branch_name:
         return None
@@ -190,7 +199,7 @@ def _upstream_ref(repo_root: Path) -> str | None:
         return None
     upstream_ref = _read_single_output_line(
         result.stdout,
-        error_message="This checkout is in an unsupported git state for automatic update.",
+        error_message=_UNSUPPORTED_GIT_STATE_MESSAGE,
     )
     if not upstream_ref:
         return None
@@ -206,37 +215,63 @@ def _branch_divergence(repo_root: Path, upstream_ref: str) -> tuple[int, int]:
         f"HEAD...{upstream_ref}",
     )
     if result.returncode != 0:
-        raise GitUpdateSafetyError(
-            "Could not determine local/remote branch divergence safely. Please update manually."
-        )
+        raise GitUpdateSafetyError(_DIVERGENCE_ERROR_MESSAGE)
 
     counts = result.stdout.strip().split()
     if len(counts) != 2:
-        raise GitUpdateSafetyError(
-            "Could not determine local/remote branch divergence safely. Please update manually."
-        )
+        raise GitUpdateSafetyError(_DIVERGENCE_ERROR_MESSAGE)
     try:
         ahead_count = int(counts[0])
         behind_count = int(counts[1])
     except ValueError as exc:
-        raise GitUpdateSafetyError(
-            "Could not determine local/remote branch divergence safely. Please update manually."
-        ) from exc
+        raise GitUpdateSafetyError(_DIVERGENCE_ERROR_MESSAGE) from exc
     if ahead_count < 0 or behind_count < 0:
-        raise GitUpdateSafetyError(
-            "Could not determine local/remote branch divergence safely. Please update manually."
-        )
+        raise GitUpdateSafetyError(_DIVERGENCE_ERROR_MESSAGE)
     return ahead_count, behind_count
 
 
 def _working_tree_status(repo_root: Path) -> tuple[bool, list[str]]:
     result = _run_git(repo_root, "status", "--short")
     if result.returncode != 0:
-        raise GitUpdateSafetyError(
-            "This checkout is in an unsupported git state for automatic update."
-        )
+        raise GitUpdateSafetyError(_UNSUPPORTED_GIT_STATE_MESSAGE)
     lines = [line for line in result.stdout.splitlines() if line.strip()]
     return bool(lines), lines
+
+
+def _ensure_no_in_progress_git_operation(repo_root: Path) -> None:
+    git_dir = _git_dir(repo_root)
+    for marker_name, operation_name in (
+        ("MERGE_HEAD", "merge"),
+        ("rebase-merge", "rebase"),
+        ("rebase-apply", "rebase"),
+        ("CHERRY_PICK_HEAD", "cherry-pick"),
+        ("REVERT_HEAD", "revert"),
+        ("BISECT_LOG", "bisect"),
+    ):
+        if (git_dir / marker_name).exists():
+            raise GitUpdateSafetyError(
+                "Cannot run `unclaw update` while a git "
+                f"{operation_name} is in progress. Run `git status`, finish or abort "
+                "that operation, then rerun `unclaw update`."
+            )
+
+
+def _git_dir(repo_root: Path) -> Path:
+    result = _run_git(repo_root, "rev-parse", "--git-dir")
+    if result.returncode != 0:
+        raise GitUpdateSafetyError(_UNSUPPORTED_GIT_STATE_MESSAGE)
+
+    git_dir_text = _read_single_output_line(
+        result.stdout,
+        error_message=_UNSUPPORTED_GIT_STATE_MESSAGE,
+    )
+    if not git_dir_text:
+        raise GitUpdateSafetyError(_UNSUPPORTED_GIT_STATE_MESSAGE)
+
+    git_dir = Path(git_dir_text)
+    if not git_dir.is_absolute():
+        git_dir = (repo_root / git_dir).resolve()
+    return git_dir
 
 
 def _run_git(repo_root: Path, *args: str) -> GitCommandResult:
@@ -250,7 +285,7 @@ def _run_git(repo_root: Path, *args: str) -> GitCommandResult:
         )
     except OSError as exc:
         raise GitUpdateSafetyError(
-            "Could not run git safely in this checkout. Please update manually."
+            "Could not run git safely in this checkout. Update it manually."
         ) from exc
     return GitCommandResult(
         returncode=completed.returncode,
@@ -260,7 +295,9 @@ def _run_git(repo_root: Path, *args: str) -> GitCommandResult:
 
 
 def _format_git_failure(message: str, result: GitCommandResult) -> str:
-    detail = result.stderr or result.stdout or "git returned an unknown error."
+    detail = _first_detail_line(result.stderr or result.stdout)
+    if not detail:
+        detail = "git returned an unknown error."
     return f"{message} {detail}"
 
 
@@ -276,10 +313,15 @@ def _read_single_output_line(stdout: str, *, error_message: str) -> str:
 def _remote_name_from_upstream(upstream_ref: str) -> str:
     remote_name, separator, branch_name = upstream_ref.partition("/")
     if not separator or not remote_name or not branch_name:
-        raise GitUpdateSafetyError(
-            "This checkout is in an unsupported git state for automatic update."
-        )
+        raise GitUpdateSafetyError(_UNSUPPORTED_GIT_STATE_MESSAGE)
     return remote_name
+
+
+def _first_detail_line(text: str) -> str:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    return lines[0]
 
 
 if __name__ == "__main__":

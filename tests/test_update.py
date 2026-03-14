@@ -64,6 +64,8 @@ def test_run_update_reports_malformed_divergence_output_cleanly(
         command = tuple(args)
         if command == ("rev-parse", "--show-toplevel"):
             return GitCommandResult(returncode=0, stdout=str(repo_root), stderr="")
+        if command == ("rev-parse", "--git-dir"):
+            return GitCommandResult(returncode=0, stdout=".git", stderr="")
         if command == ("branch", "--show-current"):
             return GitCommandResult(returncode=0, stdout="main", stderr="")
         if command == (
@@ -88,7 +90,8 @@ def test_run_update_reports_malformed_divergence_output_cleanly(
     assert "Branch: main" in outputs
     assert "Upstream: origin/main" in outputs
     assert (
-        "Could not determine local/remote branch divergence safely. Please update manually."
+        "Could not determine local and remote branch divergence safely. "
+        "Run `git fetch --prune` and `git status`, then update manually if needed."
         in outputs
     )
 
@@ -106,6 +109,8 @@ def test_run_update_reports_unsupported_upstream_state_cleanly(
         command = tuple(args)
         if command == ("rev-parse", "--show-toplevel"):
             return GitCommandResult(returncode=0, stdout=str(repo_root), stderr="")
+        if command == ("rev-parse", "--git-dir"):
+            return GitCommandResult(returncode=0, stdout=".git", stderr="")
         if command == ("branch", "--show-current"):
             return GitCommandResult(returncode=0, stdout="main", stderr="")
         if command == (
@@ -125,7 +130,8 @@ def test_run_update_reports_unsupported_upstream_state_cleanly(
     assert "Repository: " + str(repo_root) in outputs
     assert "Branch: main" in outputs
     assert (
-        "This checkout is in an unsupported git state for automatic update."
+        "This checkout is in an unsupported git state for `unclaw update`. "
+        "Run `git status`, resolve that state manually, then rerun `unclaw update`."
         in outputs
     )
 

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from uuid import uuid4
 
+from unclaw.llm.base import utc_now_iso
 from unclaw.schemas.chat import ChatMessage, MessageRole
 from unclaw.schemas.events import EventLevel, RuntimeEvent
 from unclaw.schemas.session import SessionRecord, SessionSummary
@@ -26,7 +26,7 @@ class SessionRepository:
         created_at: str | None = None,
         is_active: bool = True,
     ) -> SessionRecord:
-        timestamp = created_at or _utc_now_iso()
+        timestamp = created_at or utc_now_iso()
         record = SessionRecord(
             id=session_id or _new_id("sess"),
             title=_normalize_title(title),
@@ -105,7 +105,7 @@ class SessionRepository:
             """,
             (
                 _normalize_title(title) if title is not None else None,
-                updated_at or _utc_now_iso(),
+                updated_at or utc_now_iso(),
                 _bool_to_db(is_active) if is_active is not None else None,
                 session_id,
             ),
@@ -114,6 +114,21 @@ class SessionRepository:
             self.connection.rollback()
             return None
 
+        self.connection.commit()
+        return self.get_session(session_id)
+
+    def set_active_session(self, session_id: str) -> SessionRecord | None:
+        if self.get_session(session_id) is None:
+            return None
+
+        self.connection.execute(
+            """
+            UPDATE sessions
+            SET is_active = CASE WHEN id = ? THEN 1 ELSE 0 END
+            WHERE id = ? OR is_active = 1
+            """,
+            (session_id, session_id),
+        )
         self.connection.commit()
         return self.get_session(session_id)
 
@@ -153,7 +168,7 @@ class MessageRepository:
         message_id: str | None = None,
         created_at: str | None = None,
     ) -> ChatMessage:
-        timestamp = created_at or _utc_now_iso()
+        timestamp = created_at or utc_now_iso()
         message = ChatMessage(
             id=message_id or _new_id("msg"),
             session_id=session_id,
@@ -216,7 +231,7 @@ class EventRepository:
         event_id: str | None = None,
         created_at: str | None = None,
     ) -> RuntimeEvent:
-        timestamp = created_at or _utc_now_iso()
+        timestamp = created_at or utc_now_iso()
         event = RuntimeEvent(
             id=event_id or _new_id("evt"),
             session_id=session_id,
@@ -315,10 +330,6 @@ def _runtime_event_from_row(row: sqlite3.Row) -> RuntimeEvent:
         payload_json=row["payload_json"],
         created_at=row["created_at"],
     )
-
-
-def _utc_now_iso() -> str:
-    return datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _new_id(prefix: str) -> str:

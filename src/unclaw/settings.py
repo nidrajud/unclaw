@@ -22,8 +22,10 @@ from unclaw.constants import (
     LOG_FILE_NAME,
     LOGS_DIRECTORY_NAME,
     MODELS_CONFIG_FILE_NAME,
+    PROMPTS_DIRECTORY_NAME,
     PROJECT_ROOT_ENV_VAR,
     SESSIONS_DIRECTORY_NAME,
+    SYSTEM_PROMPT_FILE_NAME,
 )
 from unclaw.errors import ConfigurationError, PathResolutionError
 
@@ -118,8 +120,10 @@ class ModelProfile:
 class RuntimePaths:
     project_root: Path
     config_dir: Path
+    prompts_dir: Path
     app_config_path: Path
     models_config_path: Path
+    system_prompt_path: Path
     data_dir: Path
     logs_dir: Path
     sessions_dir: Path
@@ -150,6 +154,7 @@ class Settings:
     app: AppSettings
     models: dict[str, ModelProfile]
     paths: RuntimePaths
+    system_prompt: str
 
     @property
     def default_model(self) -> ModelProfile:
@@ -177,6 +182,10 @@ def load_settings(project_root: Path | None = None) -> Settings:
         models_config_path=models_config_path,
         app_settings=app_settings,
     )
+    system_prompt = _load_text_file(
+        runtime_paths.system_prompt_path,
+        description="system prompt",
+    )
 
     if app_settings.default_model_profile not in model_profiles:
         raise ConfigurationError(
@@ -185,7 +194,12 @@ def load_settings(project_root: Path | None = None) -> Settings:
             f"{models_config_path}."
         )
 
-    return Settings(app=app_settings, models=model_profiles, paths=runtime_paths)
+    return Settings(
+        app=app_settings,
+        models=model_profiles,
+        paths=runtime_paths,
+        system_prompt=system_prompt,
+    )
 
 
 def resolve_project_root(project_root: Path | None = None) -> Path:
@@ -230,6 +244,20 @@ def _load_yaml_file(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ConfigurationError(f"Configuration file must contain a mapping: {path}")
     return payload
+
+
+def _load_text_file(path: Path, *, description: str) -> str:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise ConfigurationError(f"Missing {description} file: {path}") from exc
+    except OSError as exc:
+        raise ConfigurationError(f"Could not read {description} file: {path}") from exc
+
+    normalized = text.strip()
+    if not normalized:
+        raise ConfigurationError(f"{description.title()} file must not be empty: {path}")
+    return normalized
 
 
 def _build_app_settings(
@@ -355,6 +383,7 @@ def _build_runtime_paths(
     models_config_path: Path,
     app_settings: AppSettings,
 ) -> RuntimePaths:
+    prompts_dir = config_dir / PROMPTS_DIRECTORY_NAME
     data_dir = _resolve_path(project_root, app_settings.directories.data_dir)
     logs_dir = _resolve_path(data_dir, app_settings.directories.logs_dir)
     sessions_dir = _resolve_path(data_dir, app_settings.directories.sessions_dir)
@@ -366,8 +395,10 @@ def _build_runtime_paths(
     return RuntimePaths(
         project_root=project_root,
         config_dir=config_dir,
+        prompts_dir=prompts_dir,
         app_config_path=app_config_path,
         models_config_path=models_config_path,
+        system_prompt_path=prompts_dir / SYSTEM_PROMPT_FILE_NAME,
         data_dir=data_dir,
         logs_dir=logs_dir,
         sessions_dir=sessions_dir,

@@ -105,12 +105,10 @@ class SessionManager:
         if session is None:
             raise SessionManagerError(f"Session '{session_id}' was not found.")
 
-        self._sync_active_flags(session_id)
-        self.current_session_id = session_id
-
-        switched_session = self.load_session(session_id)
+        switched_session = self.session_repository.set_active_session(session_id)
         if switched_session is None:
             raise SessionManagerError(f"Session '{session_id}' could not be reloaded.")
+        self.current_session_id = session_id
         return switched_session
 
     def rename_session(self, session_id: str, title: str) -> SessionRecord:
@@ -163,19 +161,6 @@ class SessionManager:
         selected_session = active_session or sessions[0]
         self.current_session_id = selected_session.id
 
-    def _sync_active_flags(self, active_session_id: str) -> None:
-        for session in self.session_repository.list_sessions():
-            should_be_active = session.id == active_session_id
-            if session.is_active == should_be_active:
-                continue
-
-            self.session_repository.update_session(
-                session.id,
-                updated_at=session.updated_at,
-                is_active=should_be_active,
-            )
-
     def _default_session_title(self) -> str:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
         return f"Session {timestamp}"
-

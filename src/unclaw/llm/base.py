@@ -120,4 +120,7 @@ class BaseLLMProvider(ABC):
 
 def utc_now_iso() -> str:
     """Return an ISO 8601 UTC timestamp."""
-    return datetime.now(tz=UTC).isoformat().replace("+00:00", "Z")
+    return datetime.now(tz=UTC).isoformat(timespec="microseconds").replace(
+        "+00:00",
+        "Z",
+    )

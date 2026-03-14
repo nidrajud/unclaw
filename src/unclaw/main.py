@@ -49,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(
         prog="unclaw",
-        description="Polished local-first AI agent runtime for your machine.",
+        description="Local-first AI runtime for your machine.",
         epilog=(
             "Examples:\n"
             "  unclaw start\n"
@@ -78,10 +78,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     subparsers = parser.add_subparsers(dest="command")
-    subparsers.add_parser("start", help="Start the terminal experience.")
+    subparsers.add_parser("start", help="Start the local terminal chat.")
     telegram_parser = subparsers.add_parser(
         "telegram",
-        help="Start the Telegram bot or manage Telegram chat access.",
+        help="Start the Telegram bot or manage the local chat allowlist.",
         description=(
             "Start the Telegram bot channel or manage the local Telegram chat "
             "allowlist."
@@ -121,13 +121,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Remove one Telegram chat id from the local allowlist.",
     )
     revoke_parser.add_argument("chat_id", type=int, help="Numeric Telegram chat id.")
-    subparsers.add_parser("onboard", help="Run the guided local setup flow.")
+    subparsers.add_parser("onboard", help="Run guided local setup.")
     subparsers.add_parser("help", help="Show the same help as `unclaw --help`.")
     logs_parser = subparsers.add_parser(
         "logs",
-        help="Follow local runtime logs live.",
+        help="Read local runtime logs.",
         description=(
-            "Show local runtime logs. `unclaw logs` opens the simple view by "
+            "Show local runtime logs. `unclaw logs` uses the simple view by "
             "default, and `unclaw logs full` shows the raw JSON stream."
         ),
     )
@@ -142,7 +142,10 @@ def build_parser() -> argparse.ArgumentParser:
             "`full` for raw JSON. `simple` remains accepted as a compatibility alias."
         ),
     )
-    subparsers.add_parser("update", help="Fetch and fast-forward the local checkout.")
+    subparsers.add_parser(
+        "update",
+        help="Safely fetch and fast-forward this local checkout.",
+    )
     return parser
 
 
