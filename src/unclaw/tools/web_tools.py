@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlparse
+from urllib.parse import parse_qs, unquote, urlencode, urljoin, urlparse, urlunparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from unclaw.tools.contracts import (
@@ -25,28 +25,32 @@ from unclaw.tools.registry import ToolRegistry
 _DEFAULT_MAX_FETCH_CHARS = 8_000
 _MAX_FETCH_BYTES = 1_000_000
 _DEFAULT_TIMEOUT_SECONDS = 10.0
-_DEFAULT_MAX_SEARCH_RESULTS = 5
-_MAX_SEARCH_RESULTS = 10
-_DEFAULT_MAX_SEARCH_READS = 3
-_MAX_SEARCH_READ_ATTEMPTS = 5
-_DEFAULT_SEARCH_FETCH_CHARS = 3_500
+_DEFAULT_MAX_SEARCH_RESULTS = 20
+_MAX_SEARCH_RESULTS = 20
+_DEFAULT_MAX_SEARCH_FETCHES = 30
+_DEFAULT_MAX_CRAWL_DEPTH = 2
+_MAX_CHILD_LINKS_PER_PAGE = 3
+_DEFAULT_SEARCH_FETCH_CHARS = 12_000
 _MAX_SUMMARY_POINTS = 5
 _MAX_SUMMARY_POINT_CHARS = 220
 _MAX_SOURCE_NOTE_CHARS = 220
+_MAX_PAGE_EVIDENCE_ITEMS = 3
+_MAX_KEPT_EVIDENCE_ITEMS = 8
+_MAX_OUTPUT_SOURCES = 8
 _DUCKDUCKGO_HTML_SEARCH_URL = "https://html.duckduckgo.com/html/"
 _SEARCH_PROVIDER_NAME = "DuckDuckGo HTML"
-_LOW_VALUE_RESULT_TITLES = {"accueil", "home", "homepage"}
+_LOW_VALUE_RESULT_TITLES = {"accueil", "home", "homepage", "index"}
 _ARTICLE_PATH_CUES = frozenset(
     {
         "analysis",
-        "archive",
-        "archives",
         "article",
         "articles",
         "blog",
         "blogs",
+        "entry",
+        "feature",
+        "features",
         "live",
-        "news",
         "post",
         "posts",
         "recap",
@@ -58,56 +62,60 @@ _ARTICLE_PATH_CUES = frozenset(
         "updates",
     }
 )
-_NEWS_QUERY_FRAGMENTS = (
-    "actualite",
-    "actualites",
-    "breaking",
-    "headline",
-    "headlines",
-    "latest news",
-    "nouvelles",
-    "passe aujourd hui",
-    "quoi de neuf",
-    "what happened",
+_HUB_PATH_CUES = frozenset(
+    {
+        "archive",
+        "archives",
+        "category",
+        "categories",
+        "index",
+        "latest",
+        "listing",
+        "live",
+        "page",
+        "section",
+        "tag",
+        "tags",
+        "topics",
+        "updates",
+    }
 )
-_NEWS_RESULT_CUES = (
-    "analysis",
-    "article",
-    "aujourd hui",
-    "breaking",
-    "direct",
-    "headline",
-    "live",
-    "minute by minute",
-    "news",
-    "report",
-    "story",
-    "today",
-    "update",
+_LOW_VALUE_PATH_CUES = frozenset(
+    {
+        "about",
+        "account",
+        "contact",
+        "donate",
+        "help",
+        "join",
+        "legal",
+        "login",
+        "logout",
+        "privacy",
+        "register",
+        "settings",
+        "share",
+        "signin",
+        "signup",
+        "subscribe",
+        "support",
+        "terms",
+    }
 )
-_DATETIME_QUERY_FRAGMENTS = (
-    "current date",
-    "current time",
-    "date du jour",
-    "heure actuelle",
-    "today s date",
-    "today date",
-    "what date",
-    "what time",
-    "what time is it",
-    "quelle est la date",
-    "quelle heure",
-)
-_DATETIME_RESULT_CUES = (
-    "clock",
-    "current date",
-    "current time",
-    "date",
-    "date du jour",
-    "heure",
-    "time",
-    "today",
-    "today s date",
+_GENERIC_LINK_TEXTS = frozenset(
+    {
+        "continue reading",
+        "home",
+        "learn more",
+        "menu",
+        "more",
+        "next",
+        "older posts",
+        "previous",
+        "read more",
+        "see more",
+        "view more",
+    }
 )
 _MATCH_BOILERPLATE_PREFIXES = (
     "all rights reserved",
@@ -163,86 +171,6 @@ _QUERY_STOPWORDS = frozenset(
         "what",
     }
 )
-_DATE_PATTERN = re.compile(
-    r"\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{1,2}\s+[A-Za-z]+\s+\d{4})\b"
-)
-_TIME_PATTERN = re.compile(
-    r"\b\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM|am|pm|UTC|GMT|CET|CEST|ET|PT)?\b"
-)
-_CALENDAR_WORDS = (
-    "am",
-    "apr",
-    "april",
-    "aug",
-    "august",
-    "ce jour",
-    "cest",
-    "current date",
-    "current time",
-    "date du jour",
-    "dec",
-    "december",
-    "decembre",
-    "feb",
-    "february",
-    "fevrier",
-    "fri",
-    "friday",
-    "heure",
-    "janvier",
-    "jan",
-    "january",
-    "jeu",
-    "jeudi",
-    "jul",
-    "july",
-    "juillet",
-    "jun",
-    "june",
-    "juin",
-    "lun",
-    "lundi",
-    "mar",
-    "march",
-    "mars",
-    "mardi",
-    "mai",
-    "may",
-    "mer",
-    "mercredi",
-    "mon",
-    "monday",
-    "nov",
-    "november",
-    "novembre",
-    "oct",
-    "october",
-    "octobre",
-    "pm",
-    "aout",
-    "avril",
-    "sam",
-    "samedi",
-    "sat",
-    "saturday",
-    "sep",
-    "september",
-    "septembre",
-    "sun",
-    "sunday",
-    "thu",
-    "thursday",
-    "time",
-    "today",
-    "today s date",
-    "tue",
-    "tuesday",
-    "utc",
-    "ven",
-    "vendredi",
-    "wed",
-    "wednesday",
-)
 _BLOCKED_FETCH_HOSTS = {
     "instance-data",
     "instance-data.ec2.internal",
@@ -274,6 +202,20 @@ _BLOCK_TAGS = {
     "tr",
 }
 _IGNORED_TAGS = {"noscript", "script", "style"}
+_LOW_VALUE_EXTENSIONS = (
+    ".css",
+    ".ico",
+    ".jpg",
+    ".jpeg",
+    ".js",
+    ".json",
+    ".pdf",
+    ".png",
+    ".rss",
+    ".svg",
+    ".xml",
+    ".zip",
+)
 
 FETCH_URL_TEXT_DEFINITION = ToolDefinition(
     name="fetch_url_text",
@@ -288,11 +230,13 @@ FETCH_URL_TEXT_DEFINITION = ToolDefinition(
 
 SEARCH_WEB_DEFINITION = ToolDefinition(
     name="search_web",
-    description="Search the public web, read top sources, and return a compact summary.",
+    description=(
+        "Search the public web with bounded iterative retrieval and return a compact summary."
+    ),
     permission_level=ToolPermissionLevel.NETWORK,
     arguments={
         "query": "Plain-language search query.",
-        "max_results": "Optional maximum number of results to return, between 1 and 10.",
+        "max_results": "Optional maximum number of initial search results to consider, between 1 and 20.",
         "timeout_seconds": "Optional request timeout in seconds.",
     },
 )
@@ -403,7 +347,7 @@ def fetch_url_text(
 
 
 def search_web(call: ToolCall) -> ToolResult:
-    """Search the public web, read a few pages, and synthesize compact results."""
+    """Search the public web, iteratively fetch bounded sources, and summarize evidence."""
     tool_name = SEARCH_WEB_DEFINITION.name
 
     try:
@@ -450,27 +394,24 @@ def search_web(call: ToolCall) -> ToolResult:
     except ValueError as exc:
         return ToolResult.failure(tool_name=tool_name, error=str(exc))
 
-    query_intent = _classify_search_query(query)
+    search_query = _build_search_query(query)
     raw_results = _parse_duckduckgo_html_results(response_text, max_results=max_results)
-    results = _rank_search_results(
+    ranked_results = _rank_search_results(
         _deduplicate_search_results(raw_results),
-        query_intent=query_intent,
+        query=search_query,
     )
-    sources, read_attempt_count = _build_search_sources(
-        results=results,
+    outcome = _run_iterative_retrieval(
+        results=ranked_results,
+        query=search_query,
         timeout_seconds=timeout_seconds,
-        query_intent=query_intent,
+        budget=_RetrievalBudget(max_initial_results=max_results),
     )
-    summary_points = _build_search_summary_points(
-        sources=sources,
-    )
+    summary_points = _build_search_summary_points(outcome.evidence_items)
     output_text = _format_search_results(
         query=query,
-        results=sources,
-        read_attempt_count=read_attempt_count,
+        outcome=outcome,
         summary_points=summary_points,
     )
-    read_success_count = sum(1 for source in sources if source["fetched"])
 
     return ToolResult.ok(
         tool_name=tool_name,
@@ -478,11 +419,36 @@ def search_web(call: ToolCall) -> ToolResult:
         payload={
             "query": query,
             "provider": _SEARCH_PROVIDER_NAME,
-            "result_count": len(results),
-            "read_attempt_count": read_attempt_count,
-            "read_success_count": read_success_count,
+            "initial_result_count": outcome.initial_result_count,
+            "considered_candidate_count": outcome.considered_candidate_count,
+            "fetch_attempt_count": outcome.fetch_attempt_count,
+            "fetch_success_count": outcome.fetch_success_count,
+            "evidence_count": len(outcome.evidence_items),
             "summary_points": list(summary_points),
-            "results": [dict(result) for result in sources],
+            "results": [
+                {
+                    "title": source.title,
+                    "url": source.url,
+                    "takeaway": source.takeaway,
+                    "depth": source.depth,
+                    "fetched": source.fetched,
+                    "evidence_count": source.evidence_count,
+                    "fetch_error": source.fetch_error,
+                    "used_snippet_fallback": source.used_snippet_fallback,
+                    "usefulness": source.usefulness,
+                }
+                for source in outcome.sources
+            ],
+            "evidence": [
+                {
+                    "text": evidence.text,
+                    "url": evidence.url,
+                    "source_title": evidence.source_title,
+                    "score": evidence.score,
+                    "depth": evidence.depth,
+                }
+                for evidence in outcome.evidence_items
+            ],
         },
     )
 
@@ -514,23 +480,42 @@ class _SafeRedirectHandler(HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-class _HTMLTextExtractor(HTMLParser):
-    """Collect readable text from a basic HTML document."""
+@dataclass(slots=True)
+class _HTMLLinkBuilder:
+    """Collect one anchor while parsing HTML."""
+
+    href: str
+    text_parts: list[str] = field(default_factory=list)
+
+
+class _HTMLPageExtractor(HTMLParser):
+    """Collect readable text, title, and anchor links from a basic HTML document."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self._ignored_depth = 0
+        self._title_depth = 0
         self._parts: list[str] = []
+        self._title_parts: list[str] = []
+        self._current_link: _HTMLLinkBuilder | None = None
+        self._links: list[_HTMLLink] = []
 
     def handle_starttag(
         self,
         tag: str,
         attrs: list[tuple[str, str | None]],
     ) -> None:
-        del attrs
+        attributes = dict(attrs)
         if tag in _IGNORED_TAGS:
             self._ignored_depth += 1
             return
+        if self._ignored_depth > 0:
+            return
+        if tag == "title":
+            self._title_depth += 1
+        if tag == "a":
+            self._parts.append("\n")
+            self._current_link = _HTMLLinkBuilder(href=attributes.get("href") or "")
         if tag in _BLOCK_TAGS:
             self._parts.append("\n")
 
@@ -539,17 +524,43 @@ class _HTMLTextExtractor(HTMLParser):
             if self._ignored_depth > 0:
                 self._ignored_depth -= 1
             return
+        if self._ignored_depth > 0:
+            return
+        if tag == "title" and self._title_depth > 0:
+            self._title_depth -= 1
+        if tag == "a" and self._current_link is not None:
+            href = self._current_link.href.strip()
+            text = _normalize_text(" ".join(self._current_link.text_parts))
+            if href:
+                self._links.append(_HTMLLink(url=href, text=text))
+            self._current_link = None
+            self._parts.append("\n")
         if tag in _BLOCK_TAGS:
             self._parts.append("\n")
 
     def handle_data(self, data: str) -> None:
         if self._ignored_depth > 0:
             return
-        if data.strip():
-            self._parts.append(data)
+        text = data.strip()
+        if not text:
+            return
+        self._parts.append(data)
+        if self._title_depth > 0:
+            self._title_parts.append(text)
+        if self._current_link is not None:
+            self._current_link.text_parts.append(text)
 
-    def as_text(self) -> str:
+    @property
+    def title(self) -> str:
+        return _normalize_text(" ".join(self._title_parts))
+
+    @property
+    def text(self) -> str:
         return _normalize_text("".join(self._parts))
+
+    @property
+    def links(self) -> tuple[_HTMLLink, ...]:
+        return tuple(self._links)
 
 
 @dataclass(slots=True)
@@ -559,6 +570,25 @@ class _SearchResultBuilder:
     url: str
     title_parts: list[str] = field(default_factory=list)
     snippet_parts: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class _HTMLLink:
+    """One normalized link extracted from a fetched HTML page."""
+
+    url: str
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class _RawFetchedDocument:
+    """Decoded network response body and basic metadata."""
+
+    requested_url: str
+    resolved_url: str
+    status_code: int | None
+    content_type: str
+    decoded_text: str
 
 
 @dataclass(slots=True)
@@ -574,37 +604,109 @@ class _FetchedTextDocument:
 
 
 @dataclass(frozen=True, slots=True)
-class _SearchQueryIntent:
-    """Classify the search query so ranking and note extraction stay simple."""
+class _SearchQuery:
+    """Normalized query tokens for generic retrieval scoring."""
 
     raw_query: str
     normalized_query: str
     keyword_tokens: tuple[str, ...]
-    is_news_like: bool
-    is_datetime_like: bool
-
-
-@dataclass(slots=True)
-class _SearchSourceSummary:
-    """One search result enriched with a lightweight read summary."""
-
-    title: str
-    url: str
-    snippet: str
-    note: str
-    fetched: bool
-    informative: bool = False
-    used_snippet_fallback: bool = False
-    fetch_error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
-class _SearchSourceNote:
-    """Structured note extraction for one search source."""
+class _SearchCandidate:
+    """One URL candidate waiting to be fetched."""
 
-    note: str
-    informative: bool
-    used_snippet_fallback: bool
+    url: str
+    title: str
+    snippet: str
+    depth: int
+    priority: float
+    order: int
+    parent_url: str | None = None
+    anchor_text: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class _FetchedSearchPage:
+    """Fetched page content enriched with extracted links for retrieval."""
+
+    requested_url: str
+    resolved_url: str
+    status_code: int | None
+    content_type: str
+    title: str
+    text: str
+    truncated: bool
+    links: tuple[_HTMLLink, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _EvidenceItem:
+    """One compact evidence unit retained for summary synthesis."""
+
+    text: str
+    url: str
+    source_title: str
+    score: float
+    depth: int
+    signature_tokens: tuple[str, ...]
+
+
+@dataclass(slots=True)
+class _RetrievedSource:
+    """One source considered during iterative retrieval."""
+
+    title: str
+    url: str
+    depth: int
+    fetched: bool
+    takeaway: str
+    usefulness: float
+    evidence_count: int
+    fetch_error: str | None = None
+    used_snippet_fallback: bool = False
+    relevance: float = 0.0
+    density: float = 0.0
+    novelty: float = 0.0
+    hub_score: float = 0.0
+    child_link_count: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _PageScores:
+    """Generic scoring signals for one fetched page."""
+
+    relevance: float
+    density: float
+    novelty: float
+    usefulness: float
+    hub_score: float
+    terminal_score: float
+    informative_passage_count: int
+    internal_link_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class _RetrievalBudget:
+    """Bounded retrieval budgets to keep /search deterministic and lightweight."""
+
+    max_initial_results: int = _DEFAULT_MAX_SEARCH_RESULTS
+    max_total_fetches: int = _DEFAULT_MAX_SEARCH_FETCHES
+    max_depth: int = _DEFAULT_MAX_CRAWL_DEPTH
+    max_child_links_per_page: int = _MAX_CHILD_LINKS_PER_PAGE
+    max_kept_evidence_items: int = _MAX_KEPT_EVIDENCE_ITEMS
+
+
+@dataclass(frozen=True, slots=True)
+class _RetrievalOutcome:
+    """Final retrieval state used to build tool output."""
+
+    initial_result_count: int
+    considered_candidate_count: int
+    fetch_attempt_count: int
+    fetch_success_count: int
+    evidence_items: tuple[_EvidenceItem, ...]
+    sources: tuple[_RetrievedSource, ...]
 
 
 class _DuckDuckGoHTMLSearchParser(HTMLParser):
@@ -693,15 +795,18 @@ def _decode_content(raw_content: bytes, charset: str) -> str:
         return raw_content.decode("utf-8", errors="replace")
 
 
-def _extract_text(content: str, content_type: str) -> str | None:
+def _extract_page_content(
+    content: str,
+    content_type: str,
+) -> tuple[str, str, tuple[_HTMLLink, ...]] | None:
     if content_type in {"text/html", "application/xhtml+xml"}:
-        parser = _HTMLTextExtractor()
+        parser = _HTMLPageExtractor()
         parser.feed(content)
         parser.close()
-        return parser.as_text()
+        return (parser.title, parser.text, parser.links)
 
     if _is_text_content_type(content_type):
-        return _normalize_text(content)
+        return ("", _normalize_text(content), ())
 
     return None
 
@@ -770,14 +875,13 @@ def _search_public_web(*, query: str, timeout_seconds: float) -> str:
     return _decode_content(raw_content, charset)
 
 
-def _fetch_text_document(
+def _fetch_raw_document(
     url: str,
     *,
-    max_chars: int,
     timeout_seconds: float,
     allow_private_networks: bool,
     accept_header: str,
-) -> _FetchedTextDocument:
+) -> _RawFetchedDocument:
     _ensure_fetch_target_allowed(
         url,
         allow_private_networks=allow_private_networks,
@@ -805,13 +909,39 @@ def _fetch_text_document(
     if len(raw_content) > _MAX_FETCH_BYTES:
         raw_content = raw_content[:_MAX_FETCH_BYTES]
 
-    decoded_text = _decode_content(raw_content, charset)
-    extracted_text = _extract_text(decoded_text, content_type)
-    if extracted_text is None:
+    return _RawFetchedDocument(
+        requested_url=url,
+        resolved_url=resolved_url,
+        status_code=status_code,
+        content_type=content_type,
+        decoded_text=_decode_content(raw_content, charset),
+    )
+
+
+def _fetch_text_document(
+    url: str,
+    *,
+    max_chars: int,
+    timeout_seconds: float,
+    allow_private_networks: bool,
+    accept_header: str,
+) -> _FetchedTextDocument:
+    raw_document = _fetch_raw_document(
+        url,
+        timeout_seconds=timeout_seconds,
+        allow_private_networks=allow_private_networks,
+        accept_header=accept_header,
+    )
+    extracted_content = _extract_page_content(
+        raw_document.decoded_text,
+        raw_document.content_type,
+    )
+    if extracted_content is None:
         raise ValueError(
-            f"Unsupported content type for text extraction: {content_type}"
+            f"Unsupported content type for text extraction: {raw_document.content_type}"
         )
 
+    _title, extracted_text, _links = extracted_content
     if not extracted_text:
         extracted_text = "[empty response body]"
 
@@ -819,11 +949,50 @@ def _fetch_text_document(
     text_excerpt = extracted_text[:max_chars].rstrip() if truncated else extracted_text
     return _FetchedTextDocument(
         requested_url=url,
-        resolved_url=resolved_url,
-        status_code=status_code,
-        content_type=content_type,
+        resolved_url=raw_document.resolved_url,
+        status_code=raw_document.status_code,
+        content_type=raw_document.content_type,
         text_excerpt=text_excerpt,
         truncated=truncated,
+    )
+
+
+def _fetch_search_page(
+    url: str,
+    *,
+    max_chars: int,
+    timeout_seconds: float,
+) -> _FetchedSearchPage:
+    raw_document = _fetch_raw_document(
+        url,
+        timeout_seconds=timeout_seconds,
+        allow_private_networks=False,
+        accept_header="text/plain, text/html, application/json;q=0.9, */*;q=0.1",
+    )
+    extracted_content = _extract_page_content(
+        raw_document.decoded_text,
+        raw_document.content_type,
+    )
+    if extracted_content is None:
+        raise ValueError(
+            f"Unsupported content type for text extraction: {raw_document.content_type}"
+        )
+
+    page_title, extracted_text, links = extracted_content
+    if not extracted_text:
+        extracted_text = "[empty response body]"
+
+    truncated = len(extracted_text) > max_chars
+    page_text = extracted_text[:max_chars].rstrip() if truncated else extracted_text
+    return _FetchedSearchPage(
+        requested_url=url,
+        resolved_url=raw_document.resolved_url,
+        status_code=raw_document.status_code,
+        content_type=raw_document.content_type,
+        title=page_title,
+        text=page_text,
+        truncated=truncated,
+        links=links,
     )
 
 
@@ -833,53 +1002,45 @@ def _format_text_excerpt(text: str, *, truncated: bool) -> str:
     return f"{text}\n\n[truncated]"
 
 
+def _build_search_query(query: str) -> _SearchQuery:
+    keyword_tokens = tuple(
+        token
+        for token in _text_tokens(query)
+        if len(token) >= 3 and token not in _QUERY_STOPWORDS
+    )
+    if not keyword_tokens:
+        keyword_tokens = tuple(token for token in _text_tokens(query) if len(token) >= 2)
+    return _SearchQuery(
+        raw_query=query,
+        normalized_query=_fold_for_match(query),
+        keyword_tokens=keyword_tokens,
+    )
+
+
 def _deduplicate_search_results(results: list[dict[str, str]]) -> list[dict[str, str]]:
     deduplicated: list[dict[str, str]] = []
     seen_urls: set[str] = set()
 
     for result in results:
         url = result["url"].strip()
-        if not url or url in seen_urls:
+        canonical_url = _canonicalize_url(url)
+        if not url or not canonical_url or canonical_url in seen_urls:
             continue
         deduplicated.append(dict(result))
-        seen_urls.add(url)
+        seen_urls.add(canonical_url)
 
     return deduplicated
-
-
-def _classify_search_query(query: str) -> _SearchQueryIntent:
-    normalized_query = _fold_for_match(query)
-    is_datetime_like = _contains_any_fragment(
-        normalized_query,
-        _DATETIME_QUERY_FRAGMENTS,
-    )
-    is_news_like = (
-        not is_datetime_like
-        and _contains_any_fragment(normalized_query, _NEWS_QUERY_FRAGMENTS)
-    )
-    keyword_tokens = tuple(
-        token
-        for token in _text_tokens(query)
-        if len(token) >= 3 and token not in _QUERY_STOPWORDS
-    )
-    return _SearchQueryIntent(
-        raw_query=query,
-        normalized_query=normalized_query,
-        keyword_tokens=keyword_tokens,
-        is_news_like=is_news_like,
-        is_datetime_like=is_datetime_like,
-    )
 
 
 def _rank_search_results(
     results: list[dict[str, str]],
     *,
-    query_intent: _SearchQueryIntent,
+    query: _SearchQuery,
 ) -> list[dict[str, str]]:
-    scored_results: list[tuple[int, int, dict[str, str]]] = []
+    scored_results: list[tuple[float, int, dict[str, str]]] = []
 
     for index, result in enumerate(results):
-        score = _score_search_result(result, query_intent=query_intent)
+        score = _score_search_result(result, query=query)
         scored_results.append((score, index, dict(result)))
 
     scored_results.sort(key=lambda item: (-item[0], item[1]))
@@ -889,123 +1050,612 @@ def _rank_search_results(
 def _score_search_result(
     result: Mapping[str, str],
     *,
-    query_intent: _SearchQueryIntent,
-) -> int:
+    query: _SearchQuery,
+) -> float:
     title = result.get("title", "")
     snippet = result.get("snippet", "")
     url = result.get("url", "")
     parsed_url = urlparse(url)
-    path_segments = _url_path_segments(url)
     folded_metadata = _fold_for_match(f"{title} {snippet} {url}")
+    path_segments = _url_path_segments(url)
+    score = 0.0
 
-    score = 0
-    if _url_looks_homepage_like(url):
-        score -= 7
-    else:
-        score += min(len(path_segments), 3)
+    score += _keyword_overlap_score(folded_metadata, query.keyword_tokens) * 3.0
+    score += min(len(snippet.split()) / 12.0, 2.0)
+    score += min(len(path_segments), 3)
 
     if _url_looks_article_like(url):
-        score += 5
+        score += 4.0
     if _url_looks_archive_like(url):
-        score += 2
-    if len(snippet.split()) >= 10:
-        score += 1
-
-    score += _keyword_overlap_score(folded_metadata, query_intent.keyword_tokens) * 2
-
-    if query_intent.is_news_like:
-        score += _cue_match_score(folded_metadata, _NEWS_RESULT_CUES, maximum=3)
-    if query_intent.is_datetime_like:
-        score += _cue_match_score(folded_metadata, _DATETIME_RESULT_CUES, maximum=4) * 2
-
+        score += 1.5
+    if _url_looks_homepage_like(url):
+        score -= 4.0
     if _looks_generic_result_title(title=title, hostname=parsed_url.hostname or ""):
-        score -= 2
+        score -= 2.0
 
     return score
 
 
-def _build_search_sources(
+def _run_iterative_retrieval(
     *,
     results: list[dict[str, str]],
+    query: _SearchQuery,
     timeout_seconds: float,
-    query_intent: _SearchQueryIntent,
-) -> tuple[list[dict[str, Any]], int]:
-    target_informative_reads = min(len(results), _DEFAULT_MAX_SEARCH_READS)
-    max_read_attempts = min(len(results), _MAX_SEARCH_READ_ATTEMPTS)
-    sources: list[dict[str, Any]] = []
-    read_attempt_count = 0
-    informative_read_count = 0
+    budget: _RetrievalBudget,
+) -> _RetrievalOutcome:
+    queue: list[_SearchCandidate] = []
+    considered_candidate_urls: set[str] = set()
+    sources_by_url: dict[str, _RetrievedSource] = {}
+    evidence_items: list[_EvidenceItem] = []
+    initial_results = results[: budget.max_initial_results]
+    order = 0
 
-    for result in results:
-        source = _SearchSourceSummary(
-            title=result["title"],
+    for result in initial_results:
+        candidate = _SearchCandidate(
             url=result["url"],
-            snippet=result["snippet"],
-            note="",
-            fetched=False,
+            title=result["title"],
+            snippet=result.get("snippet", ""),
+            depth=1,
+            priority=_score_search_result(result, query=query),
+            order=order,
         )
+        order += 1
+        canonical_url = _canonicalize_url(candidate.url)
+        if not canonical_url or canonical_url in considered_candidate_urls:
+            continue
+        queue.append(candidate)
+        considered_candidate_urls.add(canonical_url)
 
-        should_attempt_fetch = (
-            read_attempt_count < max_read_attempts
-            and informative_read_count < target_informative_reads
-        )
-        if should_attempt_fetch:
-            read_attempt_count += 1
-            try:
-                document = _fetch_text_document(
-                    source.url,
-                    max_chars=_DEFAULT_SEARCH_FETCH_CHARS,
-                    timeout_seconds=timeout_seconds,
-                    allow_private_networks=False,
-                    accept_header=(
-                        "text/plain, text/html, application/json;q=0.9, */*;q=0.1"
-                    ),
-                )
-            except (_BlockedFetchTargetError, HTTPError, URLError, OSError, ValueError) as exc:
-                source.fetch_error = _summarize_source_fetch_error(exc)
-            else:
-                source.url = document.resolved_url
-                source.fetched = True
-                source_note = _build_search_source_note(
-                    document.text_excerpt,
-                    title=source.title,
-                    url=source.url,
-                    fallback_snippet=source.snippet,
-                    query_intent=query_intent,
-                )
-                source.note = source_note.note
-                source.informative = source_note.informative
-                source.used_snippet_fallback = source_note.used_snippet_fallback
-                if source.informative:
-                    informative_read_count += 1
+    fetch_attempt_count = 0
+    fetch_success_count = 0
 
-        if not source.note:
-            source_note = _build_search_source_note(
-                "",
-                title=source.title,
-                url=source.url,
-                fallback_snippet=source.snippet,
-                query_intent=query_intent,
-                fetch_error=source.fetch_error,
+    while queue and fetch_attempt_count < budget.max_total_fetches:
+        queue.sort(key=lambda item: (-item.priority, item.depth, item.order))
+        candidate = queue.pop(0)
+        candidate_key = _canonicalize_url(candidate.url)
+        if not candidate_key:
+            continue
+
+        fetch_attempt_count += 1
+
+        try:
+            page = _fetch_search_page(
+                candidate.url,
+                max_chars=_DEFAULT_SEARCH_FETCH_CHARS,
+                timeout_seconds=timeout_seconds,
             )
-            source.note = source_note.note
-            source.informative = source_note.informative
-            source.used_snippet_fallback = source_note.used_snippet_fallback
+        except (_BlockedFetchTargetError, HTTPError, URLError, OSError, ValueError) as exc:
+            fetch_error = _summarize_source_fetch_error(exc)
+            fallback_evidence = _build_snippet_evidence(
+                snippet=candidate.snippet,
+                url=candidate.url,
+                title=_select_source_title("", candidate.title, candidate.anchor_text),
+                depth=candidate.depth,
+                query=query,
+                existing_evidence=evidence_items,
+            )
+            kept_count = 0
+            takeaway = _build_fallback_takeaway(
+                snippet=candidate.snippet,
+                fetch_error=fetch_error,
+            )
+            if fallback_evidence is not None:
+                kept_count = int(
+                    _merge_evidence_item(
+                        evidence_items,
+                        fallback_evidence,
+                        maximum=budget.max_kept_evidence_items,
+                    )
+                )
+                takeaway = fallback_evidence.text
 
-        sources.append(
-            {
-                "title": source.title,
-                "url": source.url,
-                "snippet": source.snippet,
-                "note": source.note,
-                "fetched": source.fetched,
-                "informative": source.informative,
-                "used_snippet_fallback": source.used_snippet_fallback,
-                "fetch_error": source.fetch_error,
-            }
+            sources_by_url[candidate_key] = _RetrievedSource(
+                title=_select_source_title("", candidate.title, candidate.anchor_text),
+                url=candidate.url,
+                depth=candidate.depth,
+                fetched=False,
+                takeaway=takeaway,
+                usefulness=max(candidate.priority - 1.0, 0.0),
+                evidence_count=kept_count,
+                fetch_error=fetch_error,
+                used_snippet_fallback=fallback_evidence is not None,
+            )
+            continue
+
+        fetch_success_count += 1
+        page_key = _canonicalize_url(page.resolved_url)
+        if not page_key:
+            page_key = candidate_key
+
+        source_title = _select_source_title(page.title, candidate.title, candidate.anchor_text)
+        evidence_candidates = _extract_page_evidence(
+            text=page.text,
+            title=source_title,
+            url=page.resolved_url,
+            depth=candidate.depth,
+            query=query,
+            existing_evidence=evidence_items,
+        )
+        page_scores = _score_fetched_page(
+            page=page,
+            title=source_title,
+            query=query,
+            evidence_candidates=evidence_candidates,
+            existing_evidence=evidence_items,
+        )
+        kept_count = 0
+        for evidence_candidate in evidence_candidates:
+            kept_count += int(
+                _merge_evidence_item(
+                    evidence_items,
+                    evidence_candidate,
+                    maximum=budget.max_kept_evidence_items,
+                )
+            )
+
+        best_takeaway = ""
+        if evidence_candidates:
+            best_takeaway = _clip_text(
+                evidence_candidates[0].text,
+                limit=_MAX_SOURCE_NOTE_CHARS,
+            )
+        else:
+            fallback_evidence = _build_snippet_evidence(
+                snippet=candidate.snippet,
+                url=page.resolved_url,
+                title=source_title,
+                depth=candidate.depth,
+                query=query,
+                existing_evidence=evidence_items,
+            )
+            if fallback_evidence is not None:
+                kept_count += int(
+                    _merge_evidence_item(
+                        evidence_items,
+                        fallback_evidence,
+                        maximum=budget.max_kept_evidence_items,
+                    )
+                )
+                best_takeaway = fallback_evidence.text
+
+        if not best_takeaway:
+            best_takeaway = _build_fallback_takeaway(
+                snippet=candidate.snippet,
+                url=page.resolved_url,
+                title=source_title,
+                fetched_text=page.text,
+            )
+
+        source = _RetrievedSource(
+            title=source_title,
+            url=page.resolved_url,
+            depth=candidate.depth,
+            fetched=True,
+            takeaway=best_takeaway,
+            usefulness=page_scores.usefulness,
+            evidence_count=kept_count,
+            used_snippet_fallback=not bool(evidence_candidates),
+            relevance=page_scores.relevance,
+            density=page_scores.density,
+            novelty=page_scores.novelty,
+            hub_score=page_scores.hub_score,
         )
 
-    return sources, read_attempt_count
+        if candidate_key != page_key and candidate_key in sources_by_url:
+            del sources_by_url[candidate_key]
+        sources_by_url[page_key] = source
+
+        if candidate.depth < budget.max_depth and _should_expand_page(page_scores):
+            child_candidates = _rank_child_candidates(
+                page=page,
+                parent_candidate=candidate,
+                query=query,
+                start_order=order,
+            )
+            child_slots = min(
+                budget.max_child_links_per_page,
+                budget.max_total_fetches - fetch_attempt_count,
+            )
+            for child_candidate in child_candidates[:child_slots]:
+                child_key = _canonicalize_url(child_candidate.url)
+                if not child_key or child_key in considered_candidate_urls:
+                    continue
+                queue.append(child_candidate)
+                considered_candidate_urls.add(child_key)
+                source.child_link_count += 1
+                order = max(order, child_candidate.order + 1)
+
+        if _should_stop_retrieval(
+            evidence_items=evidence_items,
+            sources=sources_by_url.values(),
+            fetch_attempt_count=fetch_attempt_count,
+        ):
+            break
+
+    final_evidence = tuple(
+        sorted(
+            evidence_items,
+            key=lambda item: (-item.score, item.depth, item.url, item.text.casefold()),
+        )[: budget.max_kept_evidence_items]
+    )
+    final_sources = tuple(
+        sorted(
+            sources_by_url.values(),
+            key=lambda source: (
+                -source.usefulness,
+                source.depth,
+                source.title.casefold(),
+                source.url,
+            ),
+        )[:_MAX_OUTPUT_SOURCES]
+    )
+    return _RetrievalOutcome(
+        initial_result_count=len(initial_results),
+        considered_candidate_count=len(considered_candidate_urls),
+        fetch_attempt_count=fetch_attempt_count,
+        fetch_success_count=fetch_success_count,
+        evidence_items=final_evidence,
+        sources=final_sources,
+    )
+
+
+def _extract_page_evidence(
+    *,
+    text: str,
+    title: str,
+    url: str,
+    depth: int,
+    query: _SearchQuery,
+    existing_evidence: list[_EvidenceItem],
+) -> list[_EvidenceItem]:
+    candidates: list[_EvidenceItem] = []
+
+    for passage in _iter_passages(text):
+        evidence_text = _truncate_sentences(
+            passage,
+            max_sentences=2,
+            max_chars=_MAX_SOURCE_NOTE_CHARS,
+        )
+        if not evidence_text:
+            continue
+        base_score = _score_evidence_text(
+            evidence_text,
+            title=title,
+            query=query,
+        )
+        if base_score < 1.0:
+            continue
+        signature_tokens = _build_signature_tokens(evidence_text)
+        novelty = _novelty_against_evidence(signature_tokens, existing_evidence)
+        candidates.append(
+            _EvidenceItem(
+                text=evidence_text,
+                url=url,
+                source_title=title,
+                score=base_score + novelty * 2.0,
+                depth=depth,
+                signature_tokens=signature_tokens,
+            )
+        )
+
+    deduplicated = _deduplicate_evidence_items(candidates)
+    return deduplicated[:_MAX_PAGE_EVIDENCE_ITEMS]
+
+
+def _build_snippet_evidence(
+    *,
+    snippet: str,
+    url: str,
+    title: str,
+    depth: int,
+    query: _SearchQuery,
+    existing_evidence: list[_EvidenceItem],
+) -> _EvidenceItem | None:
+    normalized_snippet = _normalize_text(snippet)
+    if not normalized_snippet:
+        return None
+
+    evidence_text = _clip_text(normalized_snippet, limit=_MAX_SOURCE_NOTE_CHARS)
+    base_score = _score_evidence_text(
+        evidence_text,
+        title=title,
+        query=query,
+    )
+    if base_score < 0.5:
+        return None
+
+    signature_tokens = _build_signature_tokens(evidence_text)
+    novelty = _novelty_against_evidence(signature_tokens, existing_evidence)
+    return _EvidenceItem(
+        text=evidence_text,
+        url=url,
+        source_title=title,
+        score=base_score + novelty,
+        depth=depth,
+        signature_tokens=signature_tokens,
+    )
+
+
+def _score_evidence_text(
+    text: str,
+    *,
+    title: str,
+    query: _SearchQuery,
+) -> float:
+    if not _is_informative_passage(text, title=title):
+        return -1.0
+
+    tokens = _text_tokens(text)
+    folded_text = _fold_for_match(text)
+    unique_ratio = len(set(tokens)) / max(len(tokens), 1)
+    score = min(len(tokens) / 12.0, 4.0)
+    score += _keyword_overlap_score(folded_text, query.keyword_tokens) * 2.5
+    score += unique_ratio * 2.0
+    if re.search(r"\b\d+(?:[.,]\d+)?%?\b", text):
+        score += 0.5
+    if _looks_like_title_echo(text, title):
+        score -= 2.5
+    if _looks_boilerplate_text(text):
+        score -= 3.0
+    return score
+
+
+def _deduplicate_evidence_items(candidates: list[_EvidenceItem]) -> list[_EvidenceItem]:
+    deduplicated: list[_EvidenceItem] = []
+    for candidate in sorted(
+        candidates,
+        key=lambda item: (-item.score, item.depth, item.url, item.text.casefold()),
+    ):
+        if any(
+            _evidence_similarity(candidate.signature_tokens, existing.signature_tokens) >= 0.8
+            for existing in deduplicated
+        ):
+            continue
+        deduplicated.append(candidate)
+    return deduplicated
+
+
+def _merge_evidence_item(
+    evidence_items: list[_EvidenceItem],
+    candidate: _EvidenceItem,
+    *,
+    maximum: int,
+) -> bool:
+    duplicate_index: int | None = None
+
+    for index, existing in enumerate(evidence_items):
+        similarity = _evidence_similarity(
+            candidate.signature_tokens,
+            existing.signature_tokens,
+        )
+        if similarity >= 0.8:
+            duplicate_index = index
+            if candidate.score > existing.score:
+                evidence_items[index] = candidate
+                evidence_items.sort(
+                    key=lambda item: (-item.score, item.depth, item.url, item.text.casefold())
+                )
+                return True
+            return False
+
+    evidence_items.append(candidate)
+    evidence_items.sort(
+        key=lambda item: (-item.score, item.depth, item.url, item.text.casefold())
+    )
+    del duplicate_index
+    if len(evidence_items) > maximum:
+        evidence_items[:] = evidence_items[:maximum]
+    return candidate in evidence_items
+
+
+def _build_signature_tokens(text: str) -> tuple[str, ...]:
+    return tuple(_text_tokens(text)[:24])
+
+
+def _evidence_similarity(
+    left_tokens: tuple[str, ...],
+    right_tokens: tuple[str, ...],
+) -> float:
+    if not left_tokens or not right_tokens:
+        return 0.0
+    left_set = set(left_tokens)
+    right_set = set(right_tokens)
+    union_size = len(left_set | right_set)
+    if union_size == 0:
+        return 0.0
+    return len(left_set & right_set) / union_size
+
+
+def _novelty_against_evidence(
+    signature_tokens: tuple[str, ...],
+    evidence_items: list[_EvidenceItem],
+) -> float:
+    if not signature_tokens or not evidence_items:
+        return 1.0
+    max_similarity = max(
+        _evidence_similarity(signature_tokens, existing.signature_tokens)
+        for existing in evidence_items
+    )
+    return max(0.0, 1.0 - max_similarity)
+
+
+def _score_fetched_page(
+    *,
+    page: _FetchedSearchPage,
+    title: str,
+    query: _SearchQuery,
+    evidence_candidates: list[_EvidenceItem],
+    existing_evidence: list[_EvidenceItem],
+) -> _PageScores:
+    page_tokens = _text_tokens(page.text)
+    informative_passage_count = sum(
+        1
+        for passage in _iter_passages(page.text)
+        if _is_informative_passage(passage, title=title)
+    )
+    internal_link_count = sum(
+        1
+        for link in page.links
+        if _is_internal_link(
+            parent_url=page.resolved_url,
+            child_url=urljoin(page.resolved_url, link.url),
+        )
+    )
+    folded_metadata = _fold_for_match(f"{title} {page.text}")
+    relevance = float(_keyword_overlap_score(folded_metadata, query.keyword_tokens))
+    density = min(len(page_tokens) / 120.0, 3.0)
+    density += min(informative_passage_count, 4) * 0.8
+    density += min(len(set(page_tokens)) / max(len(page_tokens), 1), 1.0)
+    if evidence_candidates:
+        novelty = sum(
+            _novelty_against_evidence(candidate.signature_tokens, existing_evidence)
+            for candidate in evidence_candidates
+        ) / len(evidence_candidates)
+    else:
+        novelty = 1.0
+
+    hub_score = 0.0
+    if _url_looks_homepage_like(page.resolved_url):
+        hub_score += 1.5
+    if _url_looks_archive_like(page.resolved_url):
+        hub_score += 1.0
+    hub_score += min(internal_link_count / 6.0, 3.0)
+    if informative_passage_count <= 1:
+        hub_score += 1.0
+    if len(page_tokens) < 120 and internal_link_count >= 4:
+        hub_score += 1.0
+    if _url_looks_article_like(page.resolved_url):
+        hub_score -= 0.8
+
+    terminal_score = 0.0
+    if _url_looks_article_like(page.resolved_url):
+        terminal_score += 2.0
+    terminal_score += min(informative_passage_count, 4) * 0.9
+    if len(page_tokens) >= 120:
+        terminal_score += 1.0
+    if internal_link_count <= 3:
+        terminal_score += 0.5
+
+    if _looks_low_value_page(
+        url=page.resolved_url,
+        text=page.text,
+        title=title,
+        link_count=internal_link_count,
+    ):
+        terminal_score -= 1.5
+
+    usefulness = relevance * 3.0 + density * 1.5 + novelty * 2.0 + terminal_score - hub_score
+    return _PageScores(
+        relevance=relevance,
+        density=density,
+        novelty=novelty,
+        usefulness=usefulness,
+        hub_score=hub_score,
+        terminal_score=terminal_score,
+        informative_passage_count=informative_passage_count,
+        internal_link_count=internal_link_count,
+    )
+
+
+def _should_expand_page(page_scores: _PageScores) -> bool:
+    return (
+        page_scores.hub_score >= 2.0
+        and page_scores.internal_link_count >= 2
+        and page_scores.hub_score >= page_scores.terminal_score
+    )
+
+
+def _rank_child_candidates(
+    *,
+    page: _FetchedSearchPage,
+    parent_candidate: _SearchCandidate,
+    query: _SearchQuery,
+    start_order: int,
+) -> list[_SearchCandidate]:
+    scored_candidates: list[tuple[float, int, _SearchCandidate]] = []
+    seen_urls: set[str] = set()
+
+    for offset, link in enumerate(page.links):
+        child_url = urljoin(page.resolved_url, link.url)
+        canonical_url = _canonicalize_url(child_url)
+        if not canonical_url or canonical_url in seen_urls:
+            continue
+        if not _is_supported_url(child_url):
+            continue
+        if not _is_internal_link(parent_url=page.resolved_url, child_url=child_url):
+            continue
+        if canonical_url == _canonicalize_url(page.resolved_url):
+            continue
+        if _url_looks_low_value(child_url):
+            continue
+
+        score = _score_child_link(
+            child_url=child_url,
+            anchor_text=link.text,
+            parent_url=page.resolved_url,
+            query=query,
+        )
+        candidate = _SearchCandidate(
+            url=child_url,
+            title=link.text or page.title,
+            snippet="",
+            depth=parent_candidate.depth + 1,
+            priority=score,
+            order=start_order + offset,
+            parent_url=page.resolved_url,
+            anchor_text=link.text,
+        )
+        scored_candidates.append((score, offset, candidate))
+        seen_urls.add(canonical_url)
+
+    scored_candidates.sort(key=lambda item: (-item[0], item[1]))
+    return [candidate for _score, _offset, candidate in scored_candidates]
+
+
+def _score_child_link(
+    *,
+    child_url: str,
+    anchor_text: str,
+    parent_url: str,
+    query: _SearchQuery,
+) -> float:
+    folded_metadata = _fold_for_match(f"{anchor_text} {child_url}")
+    score = _keyword_overlap_score(folded_metadata, query.keyword_tokens) * 3.0
+    score += min(len(_url_path_segments(child_url)), 3)
+    if len(_text_tokens(anchor_text)) >= 3:
+        score += 1.0
+    if _url_looks_article_like(child_url):
+        score += 4.0
+    if _child_looks_more_content_rich(child_url=child_url, parent_url=parent_url):
+        score += 2.0
+    if _link_text_looks_generic(anchor_text):
+        score -= 3.0
+    if _url_looks_archive_like(child_url):
+        score -= 0.5
+    return score
+
+
+def _child_looks_more_content_rich(*, child_url: str, parent_url: str) -> bool:
+    child_segments = _url_path_segments(child_url)
+    parent_segments = _url_path_segments(parent_url)
+    if _url_looks_article_like(child_url) and not _url_looks_article_like(parent_url):
+        return True
+    return len(child_segments) > len(parent_segments)
+
+
+def _should_stop_retrieval(
+    *,
+    evidence_items: list[_EvidenceItem],
+    sources,
+    fetch_attempt_count: int,
+) -> bool:
+    informative_source_count = sum(1 for source in sources if source.evidence_count > 0)
+    strong_evidence_count = sum(1 for evidence in evidence_items if evidence.score >= 6.0)
+    return (
+        fetch_attempt_count >= 4
+        and informative_source_count >= 2
+        and strong_evidence_count >= _MAX_SUMMARY_POINTS
+    )
 
 
 def _summarize_source_fetch_error(exc: Exception) -> str:
@@ -1016,132 +1666,42 @@ def _summarize_source_fetch_error(exc: Exception) -> str:
     return str(exc)
 
 
-def _build_search_source_note(
-    document_text: str,
-    *,
-    title: str,
-    url: str,
-    fallback_snippet: str,
-    query_intent: _SearchQueryIntent,
-    fetch_error: str | None = None,
-) -> _SearchSourceNote:
-    normalized_document = _normalize_text(document_text)
+def _select_source_title(page_title: str, search_title: str, anchor_text: str) -> str:
+    for candidate in (search_title, page_title, anchor_text):
+        normalized_candidate = _normalize_text(candidate)
+        if normalized_candidate and normalized_candidate.casefold() not in {"untitled", "index"}:
+            return normalized_candidate
+    return "Untitled source"
 
-    if query_intent.is_datetime_like:
-        direct_answer = _extract_datetime_answer(
-            normalized_document,
+
+def _build_fallback_takeaway(
+    snippet: str,
+    *,
+    fetch_error: str | None = None,
+    url: str = "",
+    title: str = "",
+    fetched_text: str = "",
+) -> str:
+    normalized_snippet = _normalize_text(snippet)
+    if normalized_snippet:
+        return _clip_text(normalized_snippet, limit=_MAX_SOURCE_NOTE_CHARS)
+    if fetch_error:
+        return _clip_text(
+            f"Could not read this page directly: {fetch_error}",
+            limit=_MAX_SOURCE_NOTE_CHARS,
+        )
+    if fetched_text and not _looks_low_value_page(
+        url=url,
+        text=fetched_text,
+        title=title,
+        link_count=0,
+    ):
+        return _truncate_sentences(
+            fetched_text,
+            max_sentences=2,
             max_chars=_MAX_SOURCE_NOTE_CHARS,
         )
-        if direct_answer:
-            return _SearchSourceNote(
-                note=direct_answer,
-                informative=True,
-                used_snippet_fallback=False,
-            )
-
-    note = _summarize_document_text(
-        normalized_document,
-        title=title,
-        query_intent=query_intent,
-        max_sentences=2,
-        max_chars=_MAX_SOURCE_NOTE_CHARS,
-    )
-    if note:
-        return _SearchSourceNote(
-            note=note,
-            informative=True,
-            used_snippet_fallback=False,
-        )
-
-    normalized_snippet = _normalize_text(fallback_snippet)
-    fallback_suffix = ""
-    if fetch_error:
-        fallback_suffix = " (Used the search snippet because the page read failed.)"
-    elif normalized_document and _looks_low_value_page(
-        url=url,
-        text=normalized_document,
-        title=title,
-    ):
-        fallback_suffix = (
-            " (Used the search snippet because the fetched page looked generic or thin.)"
-        )
-
-    if normalized_snippet:
-        return _SearchSourceNote(
-            note=_clip_text(
-                f"{normalized_snippet}{fallback_suffix}",
-                limit=_MAX_SOURCE_NOTE_CHARS,
-            ),
-            informative=False,
-            used_snippet_fallback=True,
-        )
-
-    if fetch_error:
-        return _SearchSourceNote(
-            note=_clip_text(
-                f"Could not read this page directly: {fetch_error}",
-                limit=_MAX_SOURCE_NOTE_CHARS,
-            ),
-            informative=False,
-            used_snippet_fallback=False,
-        )
-
-    return _SearchSourceNote(
-        note="Search result found, but no readable text was extracted.",
-        informative=False,
-        used_snippet_fallback=False,
-    )
-
-
-def _summarize_document_text(
-    text: str,
-    *,
-    title: str,
-    query_intent: _SearchQueryIntent,
-    max_sentences: int,
-    max_chars: int,
-) -> str:
-    normalized = _normalize_text(text)
-    if not normalized:
-        return ""
-
-    best_passage = _select_best_passage(
-        normalized,
-        title=title,
-        query_intent=query_intent,
-    )
-    if best_passage:
-        return _truncate_sentences(
-            best_passage,
-            max_sentences=max_sentences,
-            max_chars=max_chars,
-        )
-
-    return ""
-
-
-def _select_best_passage(
-    text: str,
-    *,
-    title: str,
-    query_intent: _SearchQueryIntent,
-) -> str:
-    best_passage = ""
-    best_score = -1
-
-    for passage in _iter_passages(text):
-        score = _score_passage(
-            passage,
-            title=title,
-            query_intent=query_intent,
-        )
-        if score > best_score:
-            best_passage = passage
-            best_score = score
-
-    if best_score < 1:
-        return ""
-    return best_passage
+    return "Fetched page, but no strong evidence was kept."
 
 
 def _iter_passages(text: str) -> tuple[str, ...]:
@@ -1155,26 +1715,6 @@ def _iter_passages(text: str) -> tuple[str, ...]:
     return tuple(line.strip() for line in text.splitlines() if line.strip())
 
 
-def _score_passage(
-    text: str,
-    *,
-    title: str,
-    query_intent: _SearchQueryIntent,
-) -> int:
-    if not _is_informative_passage(text, title=title):
-        return -1
-
-    score = min(len(text.split()) // 12, 4)
-    score += _keyword_overlap_score(_fold_for_match(text), query_intent.keyword_tokens) * 2
-    if query_intent.is_news_like:
-        score += _cue_match_score(_fold_for_match(text), _NEWS_RESULT_CUES, maximum=2)
-    if query_intent.is_datetime_like and _looks_datetime_sentence(text):
-        score += 4
-    if re.search(r"\b\d{2,4}\b", text):
-        score += 1
-    return score
-
-
 def _is_informative_passage(text: str, *, title: str) -> bool:
     words = text.split()
     if len(words) < 8 or _looks_like_title_echo(text, title):
@@ -1184,7 +1724,13 @@ def _is_informative_passage(text: str, *, title: str) -> bool:
     return not lowered.startswith(_MATCH_BOILERPLATE_PREFIXES)
 
 
-def _looks_low_value_page(*, url: str, text: str, title: str) -> bool:
+def _looks_low_value_page(
+    *,
+    url: str,
+    text: str,
+    title: str,
+    link_count: int,
+) -> bool:
     if not text or text == "[empty response body]":
         return True
     if len(_text_tokens(text)) < 18:
@@ -1193,7 +1739,7 @@ def _looks_low_value_page(*, url: str, text: str, title: str) -> bool:
         return True
     if _url_looks_homepage_like(url) and len(_text_tokens(text)) < 80:
         return True
-    return False
+    return link_count >= 8 and len(_text_tokens(text)) < 120
 
 
 def _looks_like_title_echo(text: str, title: str) -> bool:
@@ -1216,6 +1762,11 @@ def _looks_like_title_echo(text: str, title: str) -> bool:
     return overlap >= max(3, len(title_tokens) - 1)
 
 
+def _looks_boilerplate_text(text: str) -> bool:
+    folded_text = _fold_for_match(text)
+    return folded_text.startswith(_MATCH_BOILERPLATE_PREFIXES)
+
+
 def _truncate_sentences(text: str, *, max_sentences: int, max_chars: int) -> str:
     sentences = [
         sentence.strip()
@@ -1232,90 +1783,67 @@ def _truncate_sentences(text: str, *, max_sentences: int, max_chars: int) -> str
 
 
 def _build_search_summary_points(
-    *,
-    sources: list[dict[str, Any]],
+    evidence_items: tuple[_EvidenceItem, ...],
 ) -> tuple[str, ...]:
-    if not sources:
+    if not evidence_items:
         return ()
 
     points: list[str] = []
-    seen_signatures: set[str] = set()
-    for require_informative in (True, False):
-        for source in sources:
-            if require_informative and not source["informative"]:
-                continue
-            if not require_informative and source["informative"]:
-                continue
+    seen_signatures: set[tuple[str, ...]] = set()
+    for evidence in evidence_items:
+        signature = evidence.signature_tokens[:12]
+        if signature in seen_signatures:
+            continue
+        seen_signatures.add(signature)
+        points.append(_clip_text(evidence.text, limit=_MAX_SUMMARY_POINT_CHARS))
+        if len(points) >= _MAX_SUMMARY_POINTS:
+            break
 
-            note = _summary_ready_note(source["note"])
-            if not note:
-                continue
-
-            signature = _build_note_signature(note)
-            if signature in seen_signatures:
-                continue
-
-            seen_signatures.add(signature)
-            points.append(_clip_text(note, limit=_MAX_SUMMARY_POINT_CHARS))
-            if len(points) >= _MAX_SUMMARY_POINTS:
-                return tuple(points)
-
-    return tuple(point for point in points if point.strip())
-
-
-def _build_note_signature(text: str) -> str:
-    words = list(_text_tokens(text))
-    if not words:
-        return _fold_for_match(text)
-    return " ".join(words[:12])
+    return tuple(points)
 
 
 def _format_search_results(
     *,
     query: str,
-    results: list[dict[str, Any]],
-    read_attempt_count: int,
+    outcome: _RetrievalOutcome,
     summary_points: tuple[str, ...],
 ) -> str:
-    read_success_count = sum(1 for result in results if result["fetched"])
     lines = [
         f"Search query: {query}",
+        f"Sources considered: {outcome.considered_candidate_count}",
         (
-            "Sources considered: "
-            f"{len(results)} | Sources read: {read_success_count} of "
-            f"{read_attempt_count} attempted"
+            "Sources fetched: "
+            f"{outcome.fetch_success_count} of {outcome.fetch_attempt_count} attempted"
         ),
+        f"Evidence kept: {len(outcome.evidence_items)}",
         "",
     ]
-    if not results:
+
+    if outcome.initial_result_count == 0:
         lines.append("No public web results found.")
         return "\n".join(lines)
 
     lines.append("Summary:")
     if not summary_points:
-        lines.append("- No clear findings could be extracted from the pages I read.")
+        lines.append("- No clear findings could be extracted from the pages fetched.")
     for point in summary_points:
         lines.append(f"- {point}")
+
     lines.append("")
     lines.append("Sources:")
-
-    for index, result in enumerate(results, start=1):
-        lines.append(f"{index}. {result['title']}")
-        lines.append(f"   URL: {result['url']}")
-        note_label = "Takeaway" if result["informative"] else "Note"
-        lines.append(f"   {note_label}: {result['note']}")
-        if index != len(results):
+    for index, source in enumerate(outcome.sources, start=1):
+        lines.append(f"{index}. {source.title}")
+        lines.append(f"   URL: {source.url}")
+        lines.append(f"   Takeaway: {source.takeaway}")
+        if index != len(outcome.sources):
             lines.append("")
 
     return "\n".join(lines)
 
 
-def _contains_any_fragment(text: str, fragments: tuple[str, ...]) -> bool:
-    return any(fragment in text for fragment in fragments)
-
-
-def _cue_match_score(text: str, cues: tuple[str, ...], *, maximum: int) -> int:
-    return min(sum(1 for cue in cues if cue in text), maximum)
+def _link_text_looks_generic(text: str) -> bool:
+    normalized_text = _fold_for_match(text)
+    return normalized_text in _GENERIC_LINK_TEXTS
 
 
 def _fold_for_match(text: str) -> str:
@@ -1368,8 +1896,21 @@ def _url_looks_article_like(url: str) -> bool:
 
 
 def _url_looks_archive_like(url: str) -> bool:
-    path = urlparse(url).path.casefold()
-    return any(cue in path for cue in ("/archive", "/archives", "/live", "/today", "/update"))
+    path_segments = {segment.casefold() for segment in _url_path_segments(url)}
+    return bool(path_segments & _HUB_PATH_CUES)
+
+
+def _url_looks_low_value(url: str) -> bool:
+    parsed = urlparse(url)
+    if parsed.fragment:
+        return True
+    path = parsed.path.casefold()
+    if any(path.endswith(extension) for extension in _LOW_VALUE_EXTENSIONS):
+        return True
+    path_segments = {segment.casefold() for segment in _url_path_segments(url)}
+    if path_segments & _LOW_VALUE_PATH_CUES:
+        return True
+    return False
 
 
 def _looks_generic_result_title(*, title: str, hostname: str) -> bool:
@@ -1387,66 +1928,6 @@ def _looks_generic_result_title(*, title: str, hostname: str) -> bool:
     return False
 
 
-def _summary_ready_note(note: str) -> str:
-    normalized_note = _normalize_text(note)
-    return re.sub(
-        r"\s*\(Used the search snippet because[^)]*\)\s*$",
-        "",
-        normalized_note,
-        flags=re.IGNORECASE,
-    ).strip()
-
-
-def _looks_datetime_sentence(text: str) -> bool:
-    normalized = _fold_for_match(text)
-    if _DATE_PATTERN.search(text) or _TIME_PATTERN.search(text):
-        return True
-    return _contains_calendar_words(normalized)
-
-
-def _extract_datetime_answer(text: str, *, max_chars: int) -> str:
-    if not text:
-        return ""
-
-    date_sentence = ""
-    time_sentence = ""
-    for sentence in re.split(r"(?<=[.!?])\s+|\n+", text):
-        cleaned_sentence = " ".join(sentence.split()).strip()
-        if not cleaned_sentence:
-            continue
-        if not date_sentence and (
-            _DATE_PATTERN.search(cleaned_sentence)
-            or _contains_calendar_words(_fold_for_match(cleaned_sentence))
-        ):
-            date_sentence = cleaned_sentence
-        if not time_sentence and _TIME_PATTERN.search(cleaned_sentence):
-            time_sentence = cleaned_sentence
-        if date_sentence and time_sentence:
-            break
-
-    if date_sentence and time_sentence:
-        if date_sentence == time_sentence:
-            return _clip_text(date_sentence, limit=max_chars)
-        return _clip_text(f"{date_sentence} {time_sentence}", limit=max_chars)
-    if date_sentence:
-        return _clip_text(date_sentence, limit=max_chars)
-    if time_sentence:
-        return _clip_text(time_sentence, limit=max_chars)
-    return ""
-
-
-def _contains_calendar_words(normalized_text: str) -> bool:
-    text_tokens = set(normalized_text.split())
-    for calendar_word in _CALENDAR_WORDS:
-        if " " in calendar_word:
-            if calendar_word in normalized_text:
-                return True
-            continue
-        if calendar_word in text_tokens:
-            return True
-    return False
-
-
 def _clip_text(value: str, *, limit: int) -> str:
     normalized = " ".join(value.split()).strip()
     if len(normalized) <= limit:
@@ -1459,6 +1940,25 @@ def _clip_text(value: str, *, limit: int) -> str:
 def _is_supported_url(url: str) -> bool:
     parsed = urlparse(url)
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _canonicalize_url(url: str) -> str:
+    if not _is_supported_url(url):
+        return ""
+    parsed = urlparse(url)
+    normalized_path = parsed.path or "/"
+    if normalized_path != "/" and normalized_path.endswith("/"):
+        normalized_path = normalized_path.rstrip("/")
+    return urlunparse(
+        (
+            parsed.scheme.casefold(),
+            parsed.netloc.casefold(),
+            normalized_path,
+            "",
+            parsed.query,
+            "",
+        )
+    )
 
 
 def _normalize_search_result_url(raw_url: str | None) -> str:
@@ -1475,6 +1975,24 @@ def _normalize_search_result_url(raw_url: str | None) -> str:
                 return target_url
 
     return resolved_url
+
+
+def _registered_domain(hostname: str) -> str:
+    normalized_hostname = hostname.rstrip(".").lower()
+    if normalized_hostname.startswith("www."):
+        normalized_hostname = normalized_hostname[4:]
+    parts = normalized_hostname.split(".")
+    if len(parts) >= 2:
+        return ".".join(parts[-2:])
+    return normalized_hostname
+
+
+def _is_internal_link(*, parent_url: str, child_url: str) -> bool:
+    parent_hostname = urlparse(parent_url).hostname
+    child_hostname = urlparse(child_url).hostname
+    if parent_hostname is None or child_hostname is None:
+        return False
+    return _registered_domain(parent_hostname) == _registered_domain(child_hostname)
 
 
 def _open_request(

@@ -218,32 +218,32 @@ def test_search_tool_returns_compact_structured_results(
             <html>
               <body>
                 <div class="result">
-                  <a class="result__a" href="/l/?uddg=https%3A%2F%2Fexample.com%2Fdocs">
+                  <a class="result__a" href="https://example.com/docs/local-first-agents">
                     Example Docs
                   </a>
                   <div class="result__snippet">
-                    Read the example documentation for local-first agents.
+                    Local-first agent design notes and reliability guidance.
                   </div>
                 </div>
                 <div class="result">
-                  <a class="result__a" href="https://blog.example.com/post">
+                  <a class="result__a" href="https://blog.example.com/posts/tooling-grounding">
                     Agent Notes
                   </a>
-                  <a class="result__snippet">
-                    A short article about practical local AI agents.
-                  </a>
+                  <div class="result__snippet">
+                    Practical observations about lightweight local AI tooling.
+                  </div>
                 </div>
               </body>
             </html>
             """,
             page_bodies={
-                "https://example.com/docs": """
+                "https://example.com/docs/local-first-agents": """
                 <html><body><main>
                 <p>Local-first agents keep user data on the device and only sync what is needed.</p>
                 <p>The guide focuses on reliability, offline behavior, and predictable tool access.</p>
                 </main></body></html>
                 """,
-                "https://blog.example.com/post": """
+                "https://blog.example.com/posts/tooling-grounding": """
                 <html><body><article>
                 <p>Practical local AI agents work best when search, fetch, and file tools stay small and explicit.</p>
                 <p>The article highlights grounded summaries instead of forcing users to inspect every URL manually.</p>
@@ -262,31 +262,34 @@ def test_search_tool_returns_compact_structured_results(
 
     assert result.success is True
     assert "Search query: local first agents" in result.output_text
-    assert "Sources considered: 2 | Sources read: 2 of 2 attempted" in result.output_text
+    assert "Sources considered: 2" in result.output_text
+    assert "Sources fetched: 2 of 2 attempted" in result.output_text
+    assert "Evidence kept:" in result.output_text
     assert "Summary:" in result.output_text
     assert "Sources:" in result.output_text
     assert "Example Docs" in result.output_text
-    assert "URL: https://example.com/docs" in result.output_text
+    assert "URL: https://example.com/docs/local-first-agents" in result.output_text
     assert "Takeaway:" in result.output_text
-    assert "Snippet:" not in result.output_text
-    assert "Agent Notes" in result.output_text
+    assert "Note:" not in result.output_text
     assert (
         "- Local-first agents keep user data on the device and only sync what is needed."
         in result.output_text
     )
     assert result.payload is not None
-    assert result.payload["result_count"] == 2
-    assert result.payload["read_success_count"] == 2
-    assert result.payload["read_attempt_count"] == 2
+    assert result.payload["initial_result_count"] == 2
+    assert result.payload["fetch_success_count"] == 2
+    assert result.payload["fetch_attempt_count"] == 2
+    assert result.payload["evidence_count"] >= 2
 
 
-def test_search_tool_handles_partial_read_failures_gracefully(
+def test_search_tool_uses_iterative_second_level_exploration(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
     project_root = _create_temp_project(tmp_path)
     settings = load_settings(project_root=project_root)
     executor = ToolExecutor.with_default_tools(settings)
+    requested_urls: list[str] = []
 
     monkeypatch.setattr(
         "unclaw.tools.web_tools.socket.getaddrinfo",
@@ -301,112 +304,282 @@ def test_search_tool_handles_partial_read_failures_gracefully(
             <html>
               <body>
                 <div class="result">
-                  <a class="result__a" href="https://example.com/news">
-                    Example News
+                  <a class="result__a" href="https://example.com/updates">
+                    Example Updates
                   </a>
                   <div class="result__snippet">
-                    Example Corp published a shipping update.
-                  </div>
-                </div>
-                <div class="result">
-                  <a class="result__a" href="https://blog.example.com/post">
-                    Community Notes
-                  </a>
-                  <div class="result__snippet">
-                    Users are discussing what changed in the latest release.
+                    Archive of recent updates and release notes.
                   </div>
                 </div>
               </body>
             </html>
             """,
             page_bodies={
-                "https://example.com/news": """
-                <html><body><article>
-                <p>Example Corp says the latest release improves install reliability and startup speed.</p>
-                </article></body></html>
-                """,
-            },
-            page_errors={
-                "https://blog.example.com/post": URLError("timed out"),
-            },
-        ),
-    )
-
-    result = executor.execute(
-        ToolCall(
-            tool_name="search_web",
-            arguments={"query": "latest example release"},
-        )
-    )
-
-    assert result.success is True
-    assert "Sources considered: 2 | Sources read: 1 of 2 attempted" in result.output_text
-    assert "Summary:" in result.output_text
-    assert (
-        "- Example Corp says the latest release improves install reliability and startup speed."
-        in result.output_text
-    )
-    assert (
-        "- Users are discussing what changed in the latest release."
-        in result.output_text
-    )
-    assert "Note: Users are discussing what changed in the latest release." in result.output_text
-    assert "Used the search snippet because the page read failed." in result.output_text
-    assert result.payload is not None
-    assert result.payload["read_success_count"] == 1
-    assert result.payload["read_attempt_count"] == 2
-
-
-def test_search_tool_prefers_article_like_results_over_generic_homepages(
-    monkeypatch,
-    tmp_path: Path,
-) -> None:
-    project_root = _create_temp_project(tmp_path)
-    settings = load_settings(project_root=project_root)
-    executor = ToolExecutor.with_default_tools(settings)
-
-    monkeypatch.setattr(
-        "unclaw.tools.web_tools.socket.getaddrinfo",
-        lambda host, port, type=socket.SOCK_STREAM: [
-            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
-        ],
-    )
-    monkeypatch.setattr(
-        "unclaw.tools.web_tools._open_request",
-        _build_search_open_request(
-            search_body="""
-            <html>
-              <body>
-                <div class="result">
-                  <a class="result__a" href="https://example.com/">
-                    Example News
-                  </a>
-                  <div class="result__snippet">
-                    Latest headlines and top stories from Example News.
-                  </div>
-                </div>
-                <div class="result">
-                  <a class="result__a" href="https://example.com/2026/03/14/summit-talks-live-updates">
-                    Summit talks live updates
-                  </a>
-                  <div class="result__snippet">
-                    Live updates from today's summit talks and ceasefire negotiations.
-                  </div>
-                </div>
-              </body>
-            </html>
-            """,
-            page_bodies={
-                "https://example.com/": """
+                "https://example.com/updates": """
                 <html><body><main>
-                <h1>Example News</h1>
-                <p>Home</p>
+                <p>Recent release archive and incident index.</p>
+                <a href="/updates/release-2026-03-14-notes">March 14 release notes</a>
+                <a href="/updates/install-fix-2026-03-14">Install fix details</a>
+                <a href="/about">About</a>
+                <a href="/contact">Contact</a>
                 </main></body></html>
                 """,
-                "https://example.com/2026/03/14/summit-talks-live-updates": """
+                "https://example.com/updates/release-2026-03-14-notes": """
                 <html><body><article>
-                <p>Negotiators agreed to extend overnight talks after a draft ceasefire framework was circulated to both sides.</p>
-                <p>Officials said a humanitarian corridor could reopen if the next round of talks holds.</p>
+                <p>The March 14 release cut failed installs by 30 percent and shortened cold-start setup time.</p>
+                <p>Operators also added a clearer retry path when a local model download stalls.</p>
+                </article></body></html>
+                """,
+                "https://example.com/updates/install-fix-2026-03-14": """
+                <html><body><article>
+                <p>The install repair patch now resumes partially downloaded model files instead of starting over.</p>
+                </article></body></html>
+                """,
+            },
+            requested_urls=requested_urls,
+        ),
+    )
+
+    result = executor.execute(
+        ToolCall(
+            tool_name="search_web",
+            arguments={"query": "latest install reliability release"},
+        )
+    )
+
+    assert result.success is True
+    assert "Sources considered: 3" in result.output_text
+    assert (
+        "The install repair patch now resumes partially downloaded model files instead of starting over."
+        in result.output_text
+        or "Operators also added a clearer retry path when a local model download stalls."
+        in result.output_text
+    )
+    assert "https://example.com/updates/release-2026-03-14-notes" in requested_urls
+    assert result.payload is not None
+    assert result.payload["considered_candidate_count"] == 3
+    assert result.payload["fetch_attempt_count"] == 3
+    assert any(
+        item["url"] == "https://example.com/updates/release-2026-03-14-notes"
+        for item in result.payload["results"]
+    )
+
+
+def test_search_tool_respects_fetch_budget(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    executor = ToolExecutor.with_default_tools(settings)
+    requested_urls: list[str] = []
+    page_bodies: dict[str, str] = {}
+    search_results: list[str] = []
+
+    for index in range(1, 21):
+        hub_url = f"https://example.com/archive/{index}"
+        search_results.append(
+            f"""
+            <div class="result">
+              <a class="result__a" href="{hub_url}">
+                Archive {index}
+              </a>
+              <div class="result__snippet">
+                Archive page {index} with recent release items.
+              </div>
+            </div>
+            """
+        )
+        page_bodies[hub_url] = f"""
+        <html><body><main>
+        <p>Archive page {index} with the latest release entries.</p>
+        <a href="/archive/{index}/release-1-2026-03-14">Release 1</a>
+        <a href="/archive/{index}/release-2-2026-03-14">Release 2</a>
+        <a href="/archive/{index}/release-3-2026-03-14">Release 3</a>
+        <a href="/about">About</a>
+        </main></body></html>
+        """
+        for child_index in range(1, 4):
+            page_bodies[f"https://example.com/archive/{index}/release-{child_index}-2026-03-14"] = f"""
+            <html><body><article>
+            <p>Release {child_index} for archive {index} improved install recovery after interrupted downloads.</p>
+            </article></body></html>
+            """
+
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools.socket.getaddrinfo",
+        lambda host, port, type=socket.SOCK_STREAM: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
+        ],
+    )
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools._should_stop_retrieval",
+        lambda **kwargs: False,
+    )
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools._open_request",
+        _build_search_open_request(
+            search_body=f"<html><body>{''.join(search_results)}</body></html>",
+            page_bodies=page_bodies,
+            requested_urls=requested_urls,
+        ),
+    )
+
+    result = executor.execute(
+        ToolCall(
+            tool_name="search_web",
+            arguments={"query": "install recovery release archive"},
+        )
+    )
+
+    page_fetches = [
+        url for url in requested_urls if not url.startswith("https://html.duckduckgo.com/html/")
+    ]
+
+    assert result.success is True
+    assert result.payload is not None
+    assert result.payload["fetch_attempt_count"] == 30
+    assert result.payload["fetch_success_count"] == 30
+    assert len(page_fetches) == 30
+
+
+def test_search_tool_respects_depth_cap(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    executor = ToolExecutor.with_default_tools(settings)
+    requested_urls: list[str] = []
+
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools.socket.getaddrinfo",
+        lambda host, port, type=socket.SOCK_STREAM: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
+        ],
+    )
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools._should_stop_retrieval",
+        lambda **kwargs: False,
+    )
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools._open_request",
+        _build_search_open_request(
+            search_body="""
+            <html>
+              <body>
+                <div class="result">
+                  <a class="result__a" href="https://example.com/archive">
+                    Example Archive
+                  </a>
+                  <div class="result__snippet">
+                    Release archive and monthly indexes.
+                  </div>
+                </div>
+              </body>
+            </html>
+            """,
+            page_bodies={
+                "https://example.com/archive": """
+                <html><body><main>
+                <p>Monthly release archive index.</p>
+                <a href="/archive/march-14">March 14 archive</a>
+                <a href="/archive/february">February archive</a>
+                <a href="/about">About</a>
+                <a href="/contact">Contact</a>
+                </main></body></html>
+                """,
+                "https://example.com/archive/march-14": """
+                <html><body><main>
+                <p>March 14 archive page with grouped article links.</p>
+                <a href="/archive/march-14/details-2026-03-14">Detailed article</a>
+                <a href="/archive/march-14/related-2026-03-14">Related article</a>
+                <a href="/archive">Back to archive</a>
+                <a href="/about">About</a>
+                </main></body></html>
+                """,
+                "https://example.com/archive/february": """
+                <html><body><main>
+                <p>February archive index.</p>
+                </main></body></html>
+                """,
+                "https://example.com/archive/march-14/details-2026-03-14": """
+                <html><body><article>
+                <p>This page should never be fetched because it sits beyond the depth cap.</p>
+                </article></body></html>
+                """,
+                "https://example.com/archive/march-14/related-2026-03-14": """
+                <html><body><article>
+                <p>This sibling article should also stay unfetched at depth three.</p>
+                </article></body></html>
+                """,
+            },
+            requested_urls=requested_urls,
+        ),
+    )
+
+    result = executor.execute(
+        ToolCall(
+            tool_name="search_web",
+            arguments={"query": "march 14 release archive"},
+        )
+    )
+
+    assert result.success is True
+    assert "https://example.com/archive" in requested_urls
+    assert "https://example.com/archive/march-14" in requested_urls
+    assert "https://example.com/archive/march-14/details-2026-03-14" not in requested_urls
+    assert "https://example.com/archive/march-14/related-2026-03-14" not in requested_urls
+
+
+def test_search_tool_deduplicates_evidence_across_sources(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    executor = ToolExecutor.with_default_tools(settings)
+
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools.socket.getaddrinfo",
+        lambda host, port, type=socket.SOCK_STREAM: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
+        ],
+    )
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools._open_request",
+        _build_search_open_request(
+            search_body="""
+            <html>
+              <body>
+                <div class="result">
+                  <a class="result__a" href="https://example.com/post-a">
+                    Post A
+                  </a>
+                  <div class="result__snippet">
+                    Install reliability recap.
+                  </div>
+                </div>
+                <div class="result">
+                  <a class="result__a" href="https://example.com/post-b">
+                    Post B
+                  </a>
+                  <div class="result__snippet">
+                    Another install reliability recap.
+                  </div>
+                </div>
+              </body>
+            </html>
+            """,
+            page_bodies={
+                "https://example.com/post-a": """
+                <html><body><article>
+                <p>The release now resumes partially downloaded model files instead of restarting the transfer.</p>
+                </article></body></html>
+                """,
+                "https://example.com/post-b": """
+                <html><body><article>
+                <p>The release now resumes partially downloaded model files instead of restarting the transfer.</p>
                 </article></body></html>
                 """,
             },
@@ -416,21 +589,92 @@ def test_search_tool_prefers_article_like_results_over_generic_homepages(
     result = executor.execute(
         ToolCall(
             tool_name="search_web",
-            arguments={"query": "actualites importantes du jour"},
+            arguments={"query": "install reliability release"},
         )
     )
 
     assert result.success is True
-    assert "1. Summit talks live updates" in result.output_text
-    assert "2. Example News" in result.output_text
+    assert result.payload is not None
+    assert result.payload["evidence_count"] == 1
+    assert len(result.payload["summary_points"]) == 1
     assert (
-        result.output_text.index("1. Summit talks live updates")
-        < result.output_text.index("2. Example News")
+        result.payload["summary_points"][0]
+        == "The release now resumes partially downloaded model files instead of restarting the transfer."
     )
+
+
+def test_search_tool_prefers_article_like_child_pages_over_generic_parent_pages(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    executor = ToolExecutor.with_default_tools(settings)
+
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools.socket.getaddrinfo",
+        lambda host, port, type=socket.SOCK_STREAM: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
+        ],
+    )
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools._open_request",
+        _build_search_open_request(
+            search_body="""
+            <html>
+              <body>
+                <div class="result">
+                  <a class="result__a" href="https://example.com/releases">
+                    Example Releases
+                  </a>
+                  <div class="result__snippet">
+                    Release archive and update listings.
+                  </div>
+                </div>
+              </body>
+            </html>
+            """,
+            page_bodies={
+                "https://example.com/releases": """
+                <html><body><main>
+                <p>Release listings and archive links.</p>
+                <a href="/2026/03/14/major-release-notes">Major release notes</a>
+                <a href="/releases/archive">Archive listing</a>
+                <a href="/about">About</a>
+                <a href="/contact">Contact</a>
+                </main></body></html>
+                """,
+                "https://example.com/2026/03/14/major-release-notes": """
+                <html><body><article>
+                <p>The major release reduced failed installs and added clearer recovery steps for interrupted downloads.</p>
+                <p>Startup after the first local warmup also became noticeably faster.</p>
+                </article></body></html>
+                """,
+                "https://example.com/releases/archive": """
+                <html><body><main>
+                <p>Archive listing page.</p>
+                </main></body></html>
+                """,
+            },
+        ),
+    )
+
+    result = executor.execute(
+        ToolCall(
+            tool_name="search_web",
+            arguments={"query": "latest release install recovery"},
+        )
+    )
+
+    assert result.success is True
+    assert "1. Major release notes" in result.output_text
+    assert "2. Example Releases" in result.output_text
     assert (
-        "Negotiators agreed to extend overnight talks after a draft ceasefire framework was circulated to both sides."
-        in result.output_text
+        result.output_text.index("1. Major release notes")
+        < result.output_text.index("2. Example Releases")
     )
+    assert result.payload is not None
+    assert result.payload["results"][0]["url"] == "https://example.com/2026/03/14/major-release-notes"
 
 
 def test_search_tool_summary_bullets_capture_findings_not_titles(
@@ -505,11 +749,11 @@ def test_search_tool_summary_bullets_capture_findings_not_titles(
         "- Users said the biggest improvement was faster startup after the first model warmup."
         in result.output_text
     )
-    assert "- Quarterly Update:" not in result.output_text
-    assert "- Community Recap:" not in result.output_text
+    assert "- Quarterly Update" not in result.output_text
+    assert "- Community Recap" not in result.output_text
 
 
-def test_search_tool_extracts_direct_datetime_answers_when_available(
+def test_search_tool_handles_partial_read_failures_gracefully(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -530,23 +774,33 @@ def test_search_tool_extracts_direct_datetime_answers_when_available(
             <html>
               <body>
                 <div class="result">
-                  <a class="result__a" href="https://time.example.com/current">
-                    Date and Time
+                  <a class="result__a" href="https://example.com/news">
+                    Example News
                   </a>
                   <div class="result__snippet">
-                    Today's date and current time for UTC.
+                    Example Corp published a shipping update.
+                  </div>
+                </div>
+                <div class="result">
+                  <a class="result__a" href="https://blog.example.com/post">
+                    Community Notes
+                  </a>
+                  <div class="result__snippet">
+                    Users are discussing what changed in the latest release.
                   </div>
                 </div>
               </body>
             </html>
             """,
             page_bodies={
-                "https://time.example.com/current": """
-                <html><body><main>
-                <p>Today's date is Saturday, March 14, 2026.</p>
-                <p>Current time is 16:42 UTC.</p>
-                </main></body></html>
+                "https://example.com/news": """
+                <html><body><article>
+                <p>Example Corp says the latest release improves install reliability and startup speed.</p>
+                </article></body></html>
                 """,
+            },
+            page_errors={
+                "https://blog.example.com/post": URLError("timed out"),
             },
         ),
     )
@@ -554,16 +808,24 @@ def test_search_tool_extracts_direct_datetime_answers_when_available(
     result = executor.execute(
         ToolCall(
             tool_name="search_web",
-            arguments={"query": "quelle est la date du jour et l'heure actuelle ?"},
+            arguments={"query": "latest example release"},
         )
     )
 
     assert result.success is True
+    assert "Sources fetched: 1 of 2 attempted" in result.output_text
     assert (
-        "Today's date is Saturday, March 14, 2026. Current time is 16:42 UTC."
+        "- Example Corp says the latest release improves install reliability and startup speed."
         in result.output_text
     )
-    assert "Takeaway: Today's date is Saturday, March 14, 2026. Current time is 16:42 UTC." in result.output_text
+    assert (
+        "- Users are discussing what changed in the latest release."
+        in result.output_text
+    )
+    assert "Takeaway: Users are discussing what changed in the latest release." in result.output_text
+    assert result.payload is not None
+    assert result.payload["fetch_success_count"] == 1
+    assert result.payload["fetch_attempt_count"] == 2
 
 
 def test_search_tool_reports_provider_failures_cleanly(
@@ -608,6 +870,7 @@ def _build_search_open_request(
     search_body: str,
     page_bodies: dict[str, str],
     page_errors: dict[str, Exception] | None = None,
+    requested_urls: list[str] | None = None,
 ):
     resolved_page_errors = page_errors or {}
 
@@ -617,6 +880,8 @@ def _build_search_open_request(
         allow_private_networks,
     ):  # type: ignore[no-untyped-def]
         del timeout_seconds, allow_private_networks
+        if requested_urls is not None:
+            requested_urls.append(request.full_url)
         if request.full_url.startswith("https://html.duckduckgo.com/html/"):
             return _FakeResponse(
                 url=request.full_url,
