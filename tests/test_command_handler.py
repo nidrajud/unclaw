@@ -182,6 +182,36 @@ def test_search_uses_freeform_query_and_wires_to_search_tool() -> None:
     }
 
 
+def test_search_accepts_apostrophes_in_natural_language_queries() -> None:
+    handler = CommandHandler(
+        settings=_load_repo_settings(),
+        session_manager=_build_session_manager(),
+    )
+
+    result = handler.handle("/search qu'est-ce qu'il s'est passe aujourd'hui ?")
+
+    assert result.status is CommandStatus.OK
+    assert result.tool_call is not None
+    assert result.tool_call.tool_name == "search_web"
+    assert result.tool_call.arguments == {
+        "query": "qu'est-ce qu'il s'est passe aujourd'hui ?",
+    }
+
+
+def test_read_keeps_useful_quoted_paths_working() -> None:
+    handler = CommandHandler(
+        settings=_load_repo_settings(),
+        session_manager=_build_session_manager(),
+    )
+
+    result = handler.handle('/read "docs/My Notes.txt"')
+
+    assert result.status is CommandStatus.OK
+    assert result.tool_call is not None
+    assert result.tool_call.tool_name == "read_text_file"
+    assert result.tool_call.arguments == {"path": "docs/My Notes.txt"}
+
+
 def _load_repo_settings():
     return load_settings(project_root=Path(__file__).resolve().parents[1])
 

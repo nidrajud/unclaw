@@ -265,11 +265,15 @@ def test_search_tool_returns_compact_structured_results(
     assert "Sources considered: 2 | Sources read: 2 of 2 attempted" in result.output_text
     assert "Summary:" in result.output_text
     assert "Sources:" in result.output_text
-    assert "1. Example Docs" in result.output_text
+    assert "Example Docs" in result.output_text
     assert "URL: https://example.com/docs" in result.output_text
     assert "Takeaway:" in result.output_text
     assert "Snippet:" not in result.output_text
     assert "Agent Notes" in result.output_text
+    assert (
+        "- Local-first agents keep user data on the device and only sync what is needed."
+        in result.output_text
+    )
     assert result.payload is not None
     assert result.payload["result_count"] == 2
     assert result.payload["read_success_count"] == 2
@@ -338,12 +342,228 @@ def test_search_tool_handles_partial_read_failures_gracefully(
     assert result.success is True
     assert "Sources considered: 2 | Sources read: 1 of 2 attempted" in result.output_text
     assert "Summary:" in result.output_text
-    assert "I searched 2 public result(s), read 1 top source(s), and filled 1 gap(s) from search listings." in result.output_text
+    assert (
+        "- Example Corp says the latest release improves install reliability and startup speed."
+        in result.output_text
+    )
+    assert (
+        "- Users are discussing what changed in the latest release."
+        in result.output_text
+    )
     assert "Note: Users are discussing what changed in the latest release." in result.output_text
     assert "Used the search snippet because the page read failed." in result.output_text
     assert result.payload is not None
     assert result.payload["read_success_count"] == 1
     assert result.payload["read_attempt_count"] == 2
+
+
+def test_search_tool_prefers_article_like_results_over_generic_homepages(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    executor = ToolExecutor.with_default_tools(settings)
+
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools.socket.getaddrinfo",
+        lambda host, port, type=socket.SOCK_STREAM: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
+        ],
+    )
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools._open_request",
+        _build_search_open_request(
+            search_body="""
+            <html>
+              <body>
+                <div class="result">
+                  <a class="result__a" href="https://example.com/">
+                    Example News
+                  </a>
+                  <div class="result__snippet">
+                    Latest headlines and top stories from Example News.
+                  </div>
+                </div>
+                <div class="result">
+                  <a class="result__a" href="https://example.com/2026/03/14/summit-talks-live-updates">
+                    Summit talks live updates
+                  </a>
+                  <div class="result__snippet">
+                    Live updates from today's summit talks and ceasefire negotiations.
+                  </div>
+                </div>
+              </body>
+            </html>
+            """,
+            page_bodies={
+                "https://example.com/": """
+                <html><body><main>
+                <h1>Example News</h1>
+                <p>Home</p>
+                </main></body></html>
+                """,
+                "https://example.com/2026/03/14/summit-talks-live-updates": """
+                <html><body><article>
+                <p>Negotiators agreed to extend overnight talks after a draft ceasefire framework was circulated to both sides.</p>
+                <p>Officials said a humanitarian corridor could reopen if the next round of talks holds.</p>
+                </article></body></html>
+                """,
+            },
+        ),
+    )
+
+    result = executor.execute(
+        ToolCall(
+            tool_name="search_web",
+            arguments={"query": "actualites importantes du jour"},
+        )
+    )
+
+    assert result.success is True
+    assert "1. Summit talks live updates" in result.output_text
+    assert "2. Example News" in result.output_text
+    assert (
+        result.output_text.index("1. Summit talks live updates")
+        < result.output_text.index("2. Example News")
+    )
+    assert (
+        "Negotiators agreed to extend overnight talks after a draft ceasefire framework was circulated to both sides."
+        in result.output_text
+    )
+
+
+def test_search_tool_summary_bullets_capture_findings_not_titles(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    executor = ToolExecutor.with_default_tools(settings)
+
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools.socket.getaddrinfo",
+        lambda host, port, type=socket.SOCK_STREAM: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
+        ],
+    )
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools._open_request",
+        _build_search_open_request(
+            search_body="""
+            <html>
+              <body>
+                <div class="result">
+                  <a class="result__a" href="https://example.com/update">
+                    Quarterly Update
+                  </a>
+                  <div class="result__snippet">
+                    Release coverage for the latest Example platform changes.
+                  </div>
+                </div>
+                <div class="result">
+                  <a class="result__a" href="https://community.example.com/recap">
+                    Community Recap
+                  </a>
+                  <div class="result__snippet">
+                    Users highlighted the most noticeable changes after upgrading.
+                  </div>
+                </div>
+              </body>
+            </html>
+            """,
+            page_bodies={
+                "https://example.com/update": """
+                <html><body><article>
+                <p>Example Corp cut setup time by 30 percent and reduced failed installs in the latest release.</p>
+                <p>The update also adds clearer recovery steps when local model downloads stall.</p>
+                </article></body></html>
+                """,
+                "https://community.example.com/recap": """
+                <html><body><article>
+                <p>Users said the biggest improvement was faster startup after the first model warmup.</p>
+                <p>Several posts also mentioned that search summaries now need fewer follow-up clicks.</p>
+                </article></body></html>
+                """,
+            },
+        ),
+    )
+
+    result = executor.execute(
+        ToolCall(
+            tool_name="search_web",
+            arguments={"query": "latest example release"},
+        )
+    )
+
+    assert result.success is True
+    assert (
+        "- Example Corp cut setup time by 30 percent and reduced failed installs in the latest release."
+        in result.output_text
+    )
+    assert (
+        "- Users said the biggest improvement was faster startup after the first model warmup."
+        in result.output_text
+    )
+    assert "- Quarterly Update:" not in result.output_text
+    assert "- Community Recap:" not in result.output_text
+
+
+def test_search_tool_extracts_direct_datetime_answers_when_available(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    executor = ToolExecutor.with_default_tools(settings)
+
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools.socket.getaddrinfo",
+        lambda host, port, type=socket.SOCK_STREAM: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
+        ],
+    )
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools._open_request",
+        _build_search_open_request(
+            search_body="""
+            <html>
+              <body>
+                <div class="result">
+                  <a class="result__a" href="https://time.example.com/current">
+                    Date and Time
+                  </a>
+                  <div class="result__snippet">
+                    Today's date and current time for UTC.
+                  </div>
+                </div>
+              </body>
+            </html>
+            """,
+            page_bodies={
+                "https://time.example.com/current": """
+                <html><body><main>
+                <p>Today's date is Saturday, March 14, 2026.</p>
+                <p>Current time is 16:42 UTC.</p>
+                </main></body></html>
+                """,
+            },
+        ),
+    )
+
+    result = executor.execute(
+        ToolCall(
+            tool_name="search_web",
+            arguments={"query": "quelle est la date du jour et l'heure actuelle ?"},
+        )
+    )
+
+    assert result.success is True
+    assert (
+        "Today's date is Saturday, March 14, 2026. Current time is 16:42 UTC."
+        in result.output_text
+    )
+    assert "Takeaway: Today's date is Saturday, March 14, 2026. Current time is 16:42 UTC." in result.output_text
 
 
 def test_search_tool_reports_provider_failures_cleanly(

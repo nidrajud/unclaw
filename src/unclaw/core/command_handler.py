@@ -17,6 +17,8 @@ if TYPE_CHECKING:
     from unclaw.logs.tracer import Tracer
     from unclaw.memory import MemoryManager
 
+_FREEFORM_TOOL_COMMANDS = frozenset({"fetch", "ls", "read", "search"})
+
 
 class CommandStatus(StrEnum):
     """Render-friendly command outcome types."""
@@ -389,16 +391,49 @@ class CommandHandler:
         if not command_name:
             raise ValueError("Empty command. Use /help to list available commands.")
 
+        lowered_command_name = command_name.lower()
+        if lowered_command_name in _FREEFORM_TOOL_COMMANDS:
+            arguments = self._parse_freeform_tool_arguments(raw_arguments)
+            return ParsedCommand(
+                name=lowered_command_name,
+                arguments=arguments,
+                raw_arguments=raw_arguments,
+            )
+
         try:
             arguments = tuple(shlex_split(raw_arguments)) if raw_arguments else ()
         except ValueError as exc:
             raise ValueError(f"Could not parse command arguments: {exc}") from exc
 
         return ParsedCommand(
-            name=command_name.lower(),
+            name=lowered_command_name,
             arguments=arguments,
             raw_arguments=raw_arguments,
         )
+
+    def _parse_freeform_tool_arguments(self, raw_arguments: str) -> tuple[str, ...]:
+        raw_value = raw_arguments.strip()
+        if not raw_value:
+            return ()
+
+        try:
+            parsed_arguments = tuple(shlex_split(raw_value))
+        except ValueError:
+            parsed_arguments = ()
+
+        if len(parsed_arguments) == 1:
+            value = parsed_arguments[0].strip()
+            return (value,) if value else ()
+
+        value = self._unwrap_outer_quotes(raw_value)
+        return (value,) if value else ()
+
+    def _unwrap_outer_quotes(self, value: str) -> str:
+        stripped_value = value.strip()
+        if len(stripped_value) >= 2 and stripped_value[0] == stripped_value[-1]:
+            if stripped_value[0] in {'"', "'"}:
+                return stripped_value[1:-1].strip()
+        return stripped_value
 
     def _read_freeform_argument(self, parsed_command: ParsedCommand) -> str | None:
         raw_value = parsed_command.raw_arguments.strip()
