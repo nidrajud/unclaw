@@ -269,7 +269,8 @@ def test_search_tool_returns_compact_structured_results(
     assert "Sources:" in result.output_text
     assert "Example Docs" in result.output_text
     assert "URL: https://example.com/docs/local-first-agents" in result.output_text
-    assert "Takeaway:" in result.output_text
+    sources_section = result.output_text.split("Sources:")[1]
+    assert "Takeaway:" not in sources_section
     assert "Note:" not in result.output_text
     assert (
         "- Local-first agents keep user data on the device and only sync what is needed."
@@ -280,6 +281,8 @@ def test_search_tool_returns_compact_structured_results(
     assert result.payload["fetch_success_count"] == 2
     assert result.payload["fetch_attempt_count"] == 2
     assert result.payload["evidence_count"] >= 2
+    assert result.payload["fact_cluster_count"] >= 2
+    assert result.payload["finding_count"] >= 2
 
 
 def test_search_tool_uses_iterative_second_level_exploration(
@@ -596,11 +599,14 @@ def test_search_tool_deduplicates_evidence_across_sources(
     assert result.success is True
     assert result.payload is not None
     assert result.payload["evidence_count"] == 1
+    assert result.payload["fact_cluster_count"] == 1
+    assert result.payload["finding_count"] == 1
     assert len(result.payload["summary_points"]) == 1
     assert (
         result.payload["summary_points"][0]
         == "The release now resumes partially downloaded model files instead of restarting the transfer."
     )
+    assert result.payload["synthesized_findings"][0]["support_count"] == 2
 
 
 def test_search_tool_prefers_article_like_child_pages_over_generic_parent_pages(
@@ -750,6 +756,89 @@ def test_search_tool_summary_bullets_capture_findings_not_titles(
     assert "- Community Recap" not in result.output_text
 
 
+def test_search_tool_merges_identity_style_facts_into_one_summary_bullet(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    executor = ToolExecutor.with_default_tools(settings)
+
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools.socket.getaddrinfo",
+        lambda host, port, type=socket.SOCK_STREAM: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
+        ],
+    )
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools._open_request",
+        _build_search_open_request(
+            search_body="""
+            <html>
+              <body>
+                <div class="result">
+                  <a class="result__a" href="https://marine.example.com/a-propos">
+                    A propos de Marine Leleu
+                  </a>
+                  <div class="result__snippet">
+                    Portrait et biographie de Marine Leleu.
+                  </div>
+                </div>
+                <div class="result">
+                  <a class="result__a" href="https://sport.example.com/interview-marine-leleu">
+                    Interview Marine Leleu
+                  </a>
+                  <div class="result__snippet">
+                    Une interview sur ses projets d'endurance.
+                  </div>
+                </div>
+              </body>
+            </html>
+            """,
+            page_bodies={
+                "https://marine.example.com/a-propos": """
+                <html><body><article>
+                <p>Marine Leleu est une athlete d'endurance francaise et creatrice de contenu.</p>
+                <p>Elle partage des defis longue distance et des conseils d'entrainement.</p>
+                </article></body></html>
+                """,
+                "https://sport.example.com/interview-marine-leleu": """
+                <html><body><article>
+                <p>Marine Leleu est aussi autrice et conferenciere, connue pour ses defis Ironman et ultra-endurance.</p>
+                <p>Elle documente ses projets sportifs avec un angle pedagogique accessible.</p>
+                </article></body></html>
+                """,
+            },
+        ),
+    )
+
+    result = executor.execute(
+        ToolCall(
+            tool_name="search_web",
+            arguments={"query": "fais moi un resume sur qui est Marine Leleu"},
+        )
+    )
+
+    assert result.success is True
+    summary_lines = [
+        line for line in result.output_text.split("Sources:")[0].splitlines()
+        if line.startswith("- ")
+    ]
+    identity_lines = [line for line in summary_lines if "Marine Leleu est" in line]
+    assert len(identity_lines) == 1
+    assert "athlete d'endurance" in identity_lines[0]
+    assert (
+        "autrice" in identity_lines[0]
+        or "conferenciere" in identity_lines[0]
+    )
+    assert result.payload is not None
+    assert result.payload["finding_count"] >= 1
+    assert any(
+        finding["support_count"] >= 2 and "Marine Leleu est" in finding["text"]
+        for finding in result.payload["synthesized_findings"]
+    )
+
+
 def test_search_tool_handles_partial_read_failures_gracefully(
     monkeypatch,
     tmp_path: Path,
@@ -819,7 +908,9 @@ def test_search_tool_handles_partial_read_failures_gracefully(
         "- Users are discussing what changed in the latest release."
         in result.output_text
     )
-    assert "Takeaway: Users are discussing what changed in the latest release." in result.output_text
+    sources_section = result.output_text.split("Sources:")[1]
+    assert "Takeaway:" not in sources_section
+    assert "Users are discussing what changed in the latest release." not in sources_section
     assert result.payload is not None
     assert result.payload["fetch_success_count"] == 1
     assert result.payload["fetch_attempt_count"] == 2

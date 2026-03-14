@@ -32,7 +32,7 @@ _DEFAULT_MAX_CRAWL_DEPTH = 2
 _MAX_CHILD_LINKS_PER_PAGE = 3
 _DEFAULT_SEARCH_FETCH_CHARS = 12_000
 _MAX_SUMMARY_POINTS = 5
-_MAX_SUMMARY_POINT_CHARS = 220
+_MAX_SUMMARY_POINT_CHARS = 260
 _MAX_SOURCE_NOTE_CHARS = 220
 _MAX_PAGE_EVIDENCE_ITEMS = 3
 _MAX_KEPT_EVIDENCE_ITEMS = 8
@@ -242,6 +242,25 @@ _QUERY_STOPWORDS = frozenset(
         "un",
         "une",
         "what",
+    }
+)
+_COPULAR_TOKENS = frozenset(
+    {
+        "am",
+        "are",
+        "be",
+        "been",
+        "being",
+        "est",
+        "etaient",
+        "etait",
+        "furent",
+        "is",
+        "sera",
+        "seront",
+        "sont",
+        "was",
+        "were",
     }
 )
 _BLOCKED_FETCH_HOSTS = {
@@ -479,11 +498,16 @@ def search_web(call: ToolCall) -> ToolResult:
         timeout_seconds=timeout_seconds,
         budget=_RetrievalBudget(max_initial_results=max_results),
     )
-    summary_points = _build_search_summary_points(outcome.evidence_items, query=search_query)
+    synthesis = _synthesize_search_knowledge(
+        outcome.evidence_items,
+        query=search_query,
+    )
+    summary_points = tuple(finding.text for finding in synthesis.findings)
     output_text = _format_search_results(
         query=query,
         outcome=outcome,
         summary_points=summary_points,
+        synthesis=synthesis,
     )
 
     return ToolResult.ok(
@@ -497,7 +521,20 @@ def search_web(call: ToolCall) -> ToolResult:
             "fetch_attempt_count": outcome.fetch_attempt_count,
             "fetch_success_count": outcome.fetch_success_count,
             "evidence_count": len(outcome.evidence_items),
+            "statement_count": len(synthesis.statements),
+            "fact_cluster_count": len(synthesis.fact_clusters),
+            "finding_count": len(synthesis.findings),
             "summary_points": list(summary_points),
+            "synthesized_findings": [
+                {
+                    "text": finding.text,
+                    "score": finding.score,
+                    "support_count": finding.support_count,
+                    "source_titles": list(finding.source_titles),
+                    "source_urls": list(finding.source_urls),
+                }
+                for finding in synthesis.findings
+            ],
             "results": [
                 {
                     "title": source.title,
@@ -519,6 +556,11 @@ def search_web(call: ToolCall) -> ToolResult:
                     "source_title": evidence.source_title,
                     "score": evidence.score,
                     "depth": evidence.depth,
+                    "query_relevance": evidence.query_relevance,
+                    "evidence_quality": evidence.evidence_quality,
+                    "novelty": evidence.novelty,
+                    "supporting_urls": list(evidence.supporting_urls),
+                    "supporting_titles": list(evidence.supporting_titles),
                 }
                 for evidence in outcome.evidence_items
             ],
@@ -722,7 +764,64 @@ class _EvidenceItem:
     source_title: str
     score: float
     depth: int
+    query_relevance: float
+    evidence_quality: float
+    novelty: float
+    supporting_urls: tuple[str, ...]
+    supporting_titles: tuple[str, ...]
     signature_tokens: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _EvidenceStatement:
+    """One sentence-level evidence statement used for synthesis clustering."""
+
+    text: str
+    url: str
+    source_title: str
+    depth: int
+    score: float
+    query_relevance: float
+    evidence_quality: float
+    novelty: float
+    signature_tokens: tuple[str, ...]
+    content_tokens: tuple[str, ...]
+    subject_tokens: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _FactCluster:
+    """One aggregated cluster of overlapping evidence statements."""
+
+    merged_text: str
+    evidence: tuple[_EvidenceStatement, ...]
+    supporting_urls: tuple[str, ...]
+    source_titles: tuple[str, ...]
+    score: float
+    query_relevance: float
+    evidence_quality: float
+    novelty: float
+    support_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class _SynthesizedFinding:
+    """One user-facing finding built from an aggregated fact cluster."""
+
+    text: str
+    score: float
+    support_count: int
+    source_titles: tuple[str, ...]
+    source_urls: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _SynthesisOutcome:
+    """Temporary synthesized knowledge built from extracted evidence."""
+
+    statements: tuple[_EvidenceStatement, ...]
+    fact_clusters: tuple[_FactCluster, ...]
+    findings: tuple[_SynthesizedFinding, ...]
 
 
 @dataclass(slots=True)
@@ -1399,6 +1498,9 @@ def _extract_page_evidence(
         )
         if not evidence_text:
             continue
+        query_relevance = float(
+            _keyword_overlap_score(_fold_for_match(evidence_text), query.keyword_tokens)
+        )
         base_score = _score_evidence_text(
             evidence_text,
             title=title,
@@ -1415,6 +1517,11 @@ def _extract_page_evidence(
                 source_title=title,
                 score=base_score + novelty * 2.0,
                 depth=depth,
+                query_relevance=query_relevance,
+                evidence_quality=max(base_score - query_relevance * 2.5, 0.0),
+                novelty=novelty,
+                supporting_urls=(url,),
+                supporting_titles=(title,),
                 signature_tokens=signature_tokens,
             )
         )
@@ -1437,6 +1544,9 @@ def _build_snippet_evidence(
         return None
 
     evidence_text = _clip_text(normalized_snippet, limit=_MAX_SOURCE_NOTE_CHARS)
+    query_relevance = float(
+        _keyword_overlap_score(_fold_for_match(evidence_text), query.keyword_tokens)
+    )
     base_score = _score_evidence_text(
         evidence_text,
         title=title,
@@ -1453,6 +1563,11 @@ def _build_snippet_evidence(
         source_title=title,
         score=base_score + novelty,
         depth=depth,
+        query_relevance=query_relevance,
+        evidence_quality=max(base_score - query_relevance * 2.5, 0.0),
+        novelty=novelty,
+        supporting_urls=(url,),
+        supporting_titles=(title,),
         signature_tokens=signature_tokens,
     )
 
@@ -1511,28 +1626,46 @@ def _merge_evidence_item(
     *,
     maximum: int,
 ) -> bool:
-    duplicate_index: int | None = None
-
     for index, existing in enumerate(evidence_items):
         similarity = _evidence_similarity(
             candidate.signature_tokens,
             existing.signature_tokens,
         )
         if similarity >= 0.8:
-            duplicate_index = index
-            if candidate.score > existing.score:
-                evidence_items[index] = candidate
-                evidence_items.sort(
-                    key=lambda item: (-item.score, item.depth, item.url, item.text.casefold())
-                )
-                return True
-            return False
+            merged_urls = _merge_unique_strings(
+                existing.supporting_urls,
+                candidate.supporting_urls,
+            )
+            merged_titles = _merge_unique_strings(
+                existing.supporting_titles,
+                candidate.supporting_titles,
+            )
+            preferred = candidate if candidate.score > existing.score else existing
+            evidence_items[index] = _EvidenceItem(
+                text=preferred.text,
+                url=preferred.url,
+                source_title=preferred.source_title,
+                score=max(existing.score, candidate.score),
+                depth=min(existing.depth, candidate.depth),
+                query_relevance=max(existing.query_relevance, candidate.query_relevance),
+                evidence_quality=max(
+                    existing.evidence_quality,
+                    candidate.evidence_quality,
+                ),
+                novelty=max(existing.novelty, candidate.novelty),
+                supporting_urls=merged_urls,
+                supporting_titles=merged_titles,
+                signature_tokens=preferred.signature_tokens,
+            )
+            evidence_items.sort(
+                key=lambda item: (-item.score, item.depth, item.url, item.text.casefold())
+            )
+            return True
 
     evidence_items.append(candidate)
     evidence_items.sort(
         key=lambda item: (-item.score, item.depth, item.url, item.text.casefold())
     )
-    del duplicate_index
     if len(evidence_items) > maximum:
         evidence_items[:] = evidence_items[:maximum]
     return candidate in evidence_items
@@ -2001,90 +2134,518 @@ def _truncate_sentences(text: str, *, max_sentences: int, max_chars: int) -> str
 _MIN_SUMMARY_EVIDENCE_SCORE = 3.0
 
 
-def _build_search_summary_points(
+def _synthesize_search_knowledge(
     evidence_items: tuple[_EvidenceItem, ...],
     *,
-    query: _SearchQuery | None = None,
-) -> tuple[str, ...]:
+    query: _SearchQuery,
+) -> _SynthesisOutcome:
     if not evidence_items:
-        return ()
+        return _SynthesisOutcome(
+            statements=(),
+            fact_clusters=(),
+            findings=(),
+        )
 
-    # Build keyword-only signatures for tighter semantic dedup in summaries.
-    # Strips function words so the overlap coefficient catches near-identical
-    # facts even when phrased differently across sources.
-    def _content_words(item: _EvidenceItem) -> frozenset[str]:
-        all_tokens = _text_tokens(item.text)
-        return frozenset(t for t in all_tokens if t not in _QUERY_STOPWORDS and len(t) > 2)
+    statements = _build_evidence_statements(
+        evidence_items,
+        query=query,
+    )
+    if not statements:
+        return _SynthesisOutcome(
+            statements=(),
+            fact_clusters=(),
+            findings=(),
+        )
 
-    def _summary_overlap(a: frozenset[str], b: frozenset[str]) -> float:
-        if not a or not b:
-            return 0.0
-        return len(a & b) / min(len(a), len(b))
+    fact_clusters = _build_fact_clusters(
+        statements,
+        query=query,
+    )
+    findings = _select_synthesized_findings(fact_clusters)
+    return _SynthesisOutcome(
+        statements=statements,
+        fact_clusters=fact_clusters,
+        findings=findings,
+    )
 
-    # Pre-filter: reject evidence below quality threshold and re-check for noise
-    quality_pool: list[_EvidenceItem] = []
-    for evidence in evidence_items:
-        if evidence.score < _MIN_SUMMARY_EVIDENCE_SCORE:
+
+def _build_evidence_statements(
+    evidence_items: tuple[_EvidenceItem, ...],
+    *,
+    query: _SearchQuery,
+) -> tuple[_EvidenceStatement, ...]:
+    statements: list[_EvidenceStatement] = []
+    seen_keys: set[tuple[str, str]] = set()
+
+    for evidence in sorted(
+        evidence_items,
+        key=lambda item: (-item.score, item.depth, item.url, item.text.casefold()),
+    ):
+        if evidence.score < _MIN_SUMMARY_EVIDENCE_SCORE and evidence.evidence_quality < 1.5:
             continue
-        if _looks_site_descriptive(evidence.text):
-            continue
-        if _looks_promotional(evidence.text):
-            continue
-        if _passage_has_noise_signals(evidence.text):
-            continue
-        quality_pool.append(evidence)
 
-    if not quality_pool:
-        # Relax threshold if nothing passes the strict filter
-        quality_pool = [e for e in evidence_items if e.score >= 1.5]
-
-    # Sort: prefer items with query keyword overlap, then by score
-    if query is not None:
-        def _sort_key(item: _EvidenceItem) -> tuple[int, float]:
-            folded = _fold_for_match(item.text)
-            overlap = _keyword_overlap_score(folded, query.keyword_tokens)
-            return (-overlap, -item.score)
-        quality_pool.sort(key=_sort_key)
-
-    # Build candidate pool: deduplicate semantically across sources
-    selected: list[_EvidenceItem] = []
-    selected_content_sigs: list[frozenset[str]] = []
-    for evidence in quality_pool:
-        content_sig = _content_words(evidence)
-        # Skip if too similar to an already-selected point
-        if any(
-            _summary_overlap(content_sig, existing_sig) >= 0.50
-            for existing_sig in selected_content_sigs
-        ):
-            continue
-        selected.append(evidence)
-        selected_content_sigs.append(content_sig)
-        if len(selected) >= _MAX_SUMMARY_POINTS:
-            break
-
-    # If we have room, favor source diversity: add items from unseen sources
-    if len(selected) < _MAX_SUMMARY_POINTS:
-        seen_domains = {urlparse(item.url).hostname for item in selected}
-        for evidence in quality_pool:
-            if len(selected) >= _MAX_SUMMARY_POINTS:
-                break
-            domain = urlparse(evidence.url).hostname
-            if domain in seen_domains:
+        sentence_candidates = _split_sentences(evidence.text) or (evidence.text,)
+        for sentence in sentence_candidates:
+            statement_text = _normalize_text(sentence)
+            if not statement_text:
                 continue
-            content_sig = _content_words(evidence)
-            if any(
-                _summary_overlap(content_sig, existing_sig) >= 0.50
-                for existing_sig in selected_content_sigs
-            ):
+            if _looks_site_descriptive(statement_text):
                 continue
-            selected.append(evidence)
-            selected_content_sigs.append(content_sig)
-            seen_domains.add(domain)
+            if _looks_promotional(statement_text):
+                continue
+            if _passage_has_noise_signals(statement_text):
+                continue
+
+            statement_quality = _score_evidence_text(
+                statement_text,
+                title=evidence.source_title,
+                query=query,
+            )
+            if statement_quality < 2.0:
+                continue
+
+            query_relevance = float(
+                _keyword_overlap_score(_fold_for_match(statement_text), query.keyword_tokens)
+            )
+            signature_tokens = _build_signature_tokens(statement_text)
+            content_tokens = _content_tokens(statement_text)
+            if not content_tokens:
+                continue
+
+            support_pairs = tuple(
+                zip(
+                    evidence.supporting_urls,
+                    evidence.supporting_titles,
+                    strict=False,
+                )
+            ) or ((evidence.url, evidence.source_title),)
+            for support_url, support_title in support_pairs:
+                support_key = (_canonicalize_url(support_url) or support_url, statement_text)
+                if support_key in seen_keys:
+                    continue
+                statements.append(
+                    _EvidenceStatement(
+                        text=statement_text,
+                        url=support_url,
+                        source_title=support_title,
+                        depth=evidence.depth,
+                        score=statement_quality + evidence.novelty,
+                        query_relevance=query_relevance,
+                        evidence_quality=max(statement_quality - query_relevance * 2.5, 0.0),
+                        novelty=evidence.novelty,
+                        signature_tokens=signature_tokens,
+                        content_tokens=content_tokens,
+                        subject_tokens=_extract_subject_tokens(statement_text),
+                    )
+                )
+                seen_keys.add(support_key)
 
     return tuple(
-        _clip_text(item.text, limit=_MAX_SUMMARY_POINT_CHARS)
-        for item in selected
+        sorted(
+            statements,
+            key=lambda item: (-item.score, item.depth, item.url, item.text.casefold()),
+        )
     )
+
+
+def _build_fact_clusters(
+    statements: tuple[_EvidenceStatement, ...],
+    *,
+    query: _SearchQuery,
+) -> tuple[_FactCluster, ...]:
+    clustered_statements: list[list[_EvidenceStatement]] = []
+
+    for statement in statements:
+        best_index: int | None = None
+        best_similarity = 0.0
+        for index, cluster_members in enumerate(clustered_statements):
+            similarity = max(
+                _statement_similarity(statement, existing)
+                for existing in cluster_members
+            )
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_index = index
+
+        if best_index is not None and best_similarity >= 0.54:
+            clustered_statements[best_index].append(statement)
+            continue
+
+        clustered_statements.append([statement])
+
+    fact_clusters: list[_FactCluster] = []
+    for cluster_members in clustered_statements:
+        ordered_members = tuple(
+            sorted(
+                cluster_members,
+                key=lambda item: (-item.score, item.depth, item.url, item.text.casefold()),
+            )
+        )
+        supporting_urls = _unique_statement_urls(ordered_members)
+        source_titles = _unique_statement_titles(ordered_members)
+        support_count = len(supporting_urls)
+        distinct_domain_count = len(
+            {
+                _registered_domain(hostname)
+                for hostname in (
+                    urlparse(statement.url).hostname or ""
+                    for statement in ordered_members
+                )
+                if hostname
+            }
+        )
+        query_relevance = (
+            max((statement.query_relevance for statement in ordered_members), default=0.0)
+            + (
+                sum(statement.query_relevance for statement in ordered_members)
+                / len(ordered_members)
+            )
+            * 0.5
+        )
+        evidence_quality = sum(
+            statement.evidence_quality for statement in ordered_members[:2]
+        ) / min(len(ordered_members), 2)
+        novelty = sum(statement.novelty for statement in ordered_members) / len(ordered_members)
+        cluster_score = (
+            query_relevance * 2.5
+            + support_count * 2.0
+            + distinct_domain_count * 0.75
+            + evidence_quality * 1.5
+            + novelty * 1.25
+        )
+
+        fact_clusters.append(
+            _FactCluster(
+                merged_text=_merge_cluster_text(ordered_members, query=query),
+                evidence=ordered_members,
+                supporting_urls=supporting_urls,
+                source_titles=source_titles,
+                score=cluster_score,
+                query_relevance=query_relevance,
+                evidence_quality=evidence_quality,
+                novelty=novelty,
+                support_count=support_count,
+            )
+        )
+
+    return tuple(
+        sorted(
+            fact_clusters,
+            key=lambda cluster: (
+                -cluster.score,
+                -cluster.support_count,
+                -cluster.query_relevance,
+                cluster.merged_text.casefold(),
+            ),
+        )
+    )
+
+
+def _select_synthesized_findings(
+    fact_clusters: tuple[_FactCluster, ...],
+) -> tuple[_SynthesizedFinding, ...]:
+    if not fact_clusters:
+        return ()
+
+    findings: list[_SynthesizedFinding] = []
+    selected_signatures: list[frozenset[str]] = []
+
+    for cluster in fact_clusters:
+        cluster_signature = frozenset(_content_tokens(cluster.merged_text))
+        if cluster_signature and any(
+            _overlap_coefficient(cluster_signature, signature) >= 0.72
+            for signature in selected_signatures
+        ):
+            continue
+
+        adjusted_score = cluster.score
+        if selected_signatures:
+            adjusted_score -= max(
+                _overlap_coefficient(cluster_signature, signature) * 2.5
+                for signature in selected_signatures
+            )
+
+        if adjusted_score < 3.0 and findings:
+            continue
+
+        findings.append(
+            _SynthesizedFinding(
+                text=_clip_summary_text(cluster.merged_text, limit=_MAX_SUMMARY_POINT_CHARS),
+                score=cluster.score,
+                support_count=cluster.support_count,
+                source_titles=cluster.source_titles,
+                source_urls=cluster.supporting_urls,
+            )
+        )
+        selected_signatures.append(cluster_signature)
+
+        if len(findings) >= _MAX_SUMMARY_POINTS:
+            break
+
+    if findings:
+        return tuple(findings)
+
+    best_cluster = fact_clusters[0]
+    return (
+        _SynthesizedFinding(
+            text=_clip_summary_text(best_cluster.merged_text, limit=_MAX_SUMMARY_POINT_CHARS),
+            score=best_cluster.score,
+            support_count=best_cluster.support_count,
+            source_titles=best_cluster.source_titles,
+            source_urls=best_cluster.supporting_urls,
+        ),
+    )
+
+
+def _split_sentences(text: str) -> tuple[str, ...]:
+    return tuple(
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+", text)
+        if sentence.strip()
+    )
+
+
+def _content_tokens(text: str) -> tuple[str, ...]:
+    return tuple(
+        token
+        for token in _text_tokens(text)
+        if token not in _QUERY_STOPWORDS and (len(token) > 2 or token.isdigit())
+    )
+
+
+def _extract_subject_tokens(text: str) -> tuple[str, ...]:
+    tokens = _text_tokens(text)
+    for index, token in enumerate(tokens):
+        if token not in _COPULAR_TOKENS:
+            continue
+        subject = tuple(
+            candidate
+            for candidate in tokens[:index]
+            if candidate not in _QUERY_STOPWORDS
+        )
+        if len(subject) == 1 and subject[0] in {"elle", "he", "il", "it", "she", "they"}:
+            return ()
+        if 2 <= len(subject) <= 6:
+            return subject
+        return ()
+    return ()
+
+
+def _statement_similarity(
+    left: _EvidenceStatement,
+    right: _EvidenceStatement,
+) -> float:
+    similarity = max(
+        _evidence_similarity(left.content_tokens, right.content_tokens),
+        _overlap_coefficient(left.content_tokens, right.content_tokens),
+        _substring_similarity(left.text, right.text),
+    )
+
+    if left.subject_tokens and right.subject_tokens:
+        subject_overlap = _overlap_coefficient(left.subject_tokens, right.subject_tokens)
+        if left.subject_tokens == right.subject_tokens:
+            similarity = max(similarity, 0.62)
+        elif subject_overlap >= 1.0 and len(set(left.subject_tokens) & set(right.subject_tokens)) >= 2:
+            similarity = max(similarity, 0.56)
+
+    return similarity
+
+
+def _overlap_coefficient(
+    left_tokens,
+    right_tokens,
+) -> float:
+    left_set = set(left_tokens)
+    right_set = set(right_tokens)
+    if not left_set or not right_set:
+        return 0.0
+    return len(left_set & right_set) / min(len(left_set), len(right_set))
+
+
+def _substring_similarity(left_text: str, right_text: str) -> float:
+    left_folded = _fold_for_match(left_text)
+    right_folded = _fold_for_match(right_text)
+    if not left_folded or not right_folded:
+        return 0.0
+    if left_folded in right_folded or right_folded in left_folded:
+        return 0.78
+    return 0.0
+
+
+def _merge_cluster_text(
+    cluster_members: tuple[_EvidenceStatement, ...],
+    *,
+    query: _SearchQuery,
+) -> str:
+    copular_merge = _merge_copular_cluster(cluster_members)
+    if copular_merge:
+        return _clip_summary_text(copular_merge, limit=_MAX_SUMMARY_POINT_CHARS)
+
+    lead_statement = cluster_members[0].text.strip()
+    lead_signature = frozenset(cluster_members[0].content_tokens)
+    combined_parts = [_strip_terminal_punctuation(lead_statement)]
+
+    for statement in cluster_members[1:]:
+        candidate_signature = frozenset(statement.content_tokens)
+        if _overlap_coefficient(candidate_signature, lead_signature) >= 0.85:
+            continue
+
+        candidate_text = _strip_terminal_punctuation(statement.text)
+        proposed = _join_summary_parts((*combined_parts, candidate_text))
+        if len(proposed) <= _MAX_SUMMARY_POINT_CHARS:
+            combined_parts.append(candidate_text)
+            break
+
+    return _clip_summary_text(
+        _join_summary_parts(tuple(combined_parts)),
+        limit=_MAX_SUMMARY_POINT_CHARS,
+    )
+
+
+def _merge_copular_cluster(
+    cluster_members: tuple[_EvidenceStatement, ...],
+) -> str:
+    parsed_statements: list[tuple[str, str, str, _EvidenceStatement]] = []
+    for statement in cluster_members:
+        parsed = _split_copular_statement(statement.text)
+        if parsed is None:
+            continue
+        subject_text, verb_text, complement_text = parsed
+        if statement.subject_tokens and statement.subject_tokens == _extract_subject_tokens(
+            statement.text
+        ):
+            parsed_statements.append((subject_text, verb_text, complement_text, statement))
+
+    if len(parsed_statements) < 2:
+        return ""
+
+    best_subject, best_verb, best_complement, best_statement = parsed_statements[0]
+    best_subject_tokens = best_statement.subject_tokens
+    complement_parts = [_strip_terminal_punctuation(best_complement)]
+    complement_signatures = [frozenset(_content_tokens(best_complement))]
+
+    for subject_text, _verb_text, complement_text, statement in parsed_statements[1:]:
+        if statement.subject_tokens != best_subject_tokens:
+            continue
+        if subject_text.casefold() != best_subject.casefold():
+            continue
+        complement_signature = frozenset(_content_tokens(complement_text))
+        if any(
+            _overlap_coefficient(complement_signature, signature) >= 0.72
+            for signature in complement_signatures
+        ):
+            continue
+        candidate_part = _strip_terminal_punctuation(complement_text)
+        proposed = f"{best_subject} {best_verb} {'; '.join((*complement_parts, candidate_part))}."
+        if len(proposed) > _MAX_SUMMARY_POINT_CHARS:
+            continue
+        complement_parts.append(candidate_part)
+        complement_signatures.append(complement_signature)
+        if len(complement_parts) >= 3:
+            break
+
+    if len(complement_parts) < 2:
+        return ""
+
+    return f"{best_subject} {best_verb} {'; '.join(complement_parts)}."
+
+
+def _split_copular_statement(text: str) -> tuple[str, str, str] | None:
+    match = re.match(
+        (
+            r"^\s*"
+            r"([^,.!?]{2,80}?)"
+            r"\s+"
+            r"(am|are|be|been|being|est|etait|etaient|étaient|était|furent|is|sera|seront|sont|was|were)"
+            r"\s+"
+            r"(.+?)"
+            r"\s*$"
+        ),
+        text,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        return None
+
+    subject_text = match.group(1).strip(" ,;:")
+    verb_text = match.group(2).strip()
+    complement_text = match.group(3).strip()
+    if not subject_text or not complement_text:
+        return None
+    return (subject_text, verb_text, complement_text)
+
+
+def _join_summary_parts(parts: tuple[str, ...]) -> str:
+    cleaned_parts = [part.strip() for part in parts if part.strip()]
+    if not cleaned_parts:
+        return ""
+    joined = ". ".join(_strip_terminal_punctuation(part) for part in cleaned_parts)
+    if joined and joined[-1] not in ".!?":
+        joined += "."
+    return joined
+
+
+def _strip_terminal_punctuation(text: str) -> str:
+    return text.strip().rstrip(" ,;:.!?")
+
+
+def _clip_summary_text(value: str, *, limit: int) -> str:
+    normalized = " ".join(value.split()).strip()
+    if len(normalized) <= limit:
+        return normalized
+
+    for separator in (". ", "; ", ", "):
+        boundary = normalized.rfind(separator, 0, limit)
+        if boundary >= int(limit * 0.65):
+            clipped = normalized[: boundary + (1 if separator == ". " else 0)].rstrip()
+            if clipped and clipped[-1] not in ".!?":
+                clipped += "."
+            return clipped
+
+    return _clip_text(normalized, limit=limit)
+
+
+def _merge_unique_strings(
+    left: tuple[str, ...],
+    right: tuple[str, ...],
+) -> tuple[str, ...]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for value in (*left, *right):
+        key = value.casefold()
+        if key in seen:
+            continue
+        merged.append(value)
+        seen.add(key)
+    return tuple(merged)
+
+
+def _unique_statement_urls(
+    cluster_members: tuple[_EvidenceStatement, ...],
+) -> tuple[str, ...]:
+    unique_urls: list[str] = []
+    seen_urls: set[str] = set()
+    for statement in cluster_members:
+        canonical_url = _canonicalize_url(statement.url) or statement.url
+        if canonical_url in seen_urls:
+            continue
+        unique_urls.append(statement.url)
+        seen_urls.add(canonical_url)
+    return tuple(unique_urls)
+
+
+def _unique_statement_titles(
+    cluster_members: tuple[_EvidenceStatement, ...],
+) -> tuple[str, ...]:
+    unique_titles: list[str] = []
+    seen_titles: set[str] = set()
+    for statement in cluster_members:
+        title_key = statement.source_title.casefold()
+        if title_key in seen_titles:
+            continue
+        unique_titles.append(statement.source_title)
+        seen_titles.add(title_key)
+    return tuple(unique_titles)
 
 
 def _format_search_results(
@@ -2092,7 +2653,12 @@ def _format_search_results(
     query: str,
     outcome: _RetrievalOutcome,
     summary_points: tuple[str, ...],
+    synthesis: _SynthesisOutcome,
 ) -> str:
+    display_sources = _select_output_sources(
+        sources=outcome.sources,
+        synthesis=synthesis,
+    )
     lines = [
         f"Search query: {query}",
         f"Sources considered: {outcome.considered_candidate_count}",
@@ -2116,14 +2682,41 @@ def _format_search_results(
 
     lines.append("")
     lines.append("Sources:")
-    for index, source in enumerate(outcome.sources, start=1):
+    if not display_sources:
+        lines.append("1. No source was strong enough to retain in the final answer.")
+    for index, source in enumerate(display_sources, start=1):
         lines.append(f"{index}. {source.title}")
         lines.append(f"   URL: {source.url}")
-        lines.append(f"   Takeaway: {source.takeaway}")
-        if index != len(outcome.sources):
+        if index != len(display_sources):
             lines.append("")
 
     return "\n".join(lines)
+
+
+def _select_output_sources(
+    *,
+    sources: tuple[_RetrievedSource, ...],
+    synthesis: _SynthesisOutcome,
+) -> tuple[_RetrievedSource, ...]:
+    if not sources:
+        return ()
+
+    finding_urls = {
+        _canonicalize_url(url) or url
+        for finding in synthesis.findings
+        for url in finding.source_urls
+    }
+    if not finding_urls:
+        return sources
+
+    selected_sources = tuple(
+        source
+        for source in sources
+        if (_canonicalize_url(source.url) or source.url) in finding_urls
+    )
+    if selected_sources:
+        return selected_sources
+    return sources
 
 
 def _link_text_looks_generic(text: str) -> bool:
