@@ -858,6 +858,290 @@ def test_search_tool_reports_provider_failures_cleanly(
     assert result.error == "Could not search the web for 'local first agents': timed out"
 
 
+def test_search_tool_filters_consent_and_cookie_noise_from_evidence(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    executor = ToolExecutor.with_default_tools(settings)
+
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools.socket.getaddrinfo",
+        lambda host, port, type=socket.SOCK_STREAM: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
+        ],
+    )
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools._open_request",
+        _build_search_open_request(
+            search_body="""
+            <html>
+              <body>
+                <div class="result">
+                  <a class="result__a" href="https://example.com/article/2025/03/14/climate-report">
+                    Climate Report
+                  </a>
+                  <div class="result__snippet">
+                    New global emissions data was released by researchers this week.
+                  </div>
+                </div>
+              </body>
+            </html>
+            """,
+            page_bodies={
+                "https://example.com/article/2025/03/14/climate-report": """
+                <html><body><article>
+                <p>Nous utilisons des cookies pour ameliorer votre experience. Accepter les cookies pour continuer la navigation.</p>
+                <p>En poursuivant votre navigation, vous acceptez notre politique de confidentialite et nos partenaires data.</p>
+                <p>Global carbon emissions rose by 1.2 percent in 2024, according to a new report from the International Energy Agency.</p>
+                <p>The increase was driven by growing industrial output in Southeast Asia and reduced hydroelectric generation in South America.</p>
+                </article></body></html>
+                """,
+            },
+        ),
+    )
+
+    result = executor.execute(
+        ToolCall(
+            tool_name="search_web",
+            arguments={"query": "climate emissions report 2024"},
+        )
+    )
+
+    assert result.success is True
+    # The factual passage should be kept
+    assert "carbon emissions" in result.output_text
+    # Cookie/consent noise must not appear in summary bullets
+    assert "cookies" not in result.output_text.lower().split("Sources:")[0]
+    assert "partenaires data" not in result.output_text.lower().split("Sources:")[0]
+    assert "confidentialite" not in result.output_text.lower().split("Sources:")[0]
+
+
+def test_search_tool_filters_site_descriptive_passages(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    executor = ToolExecutor.with_default_tools(settings)
+
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools.socket.getaddrinfo",
+        lambda host, port, type=socket.SOCK_STREAM: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
+        ],
+    )
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools._open_request",
+        _build_search_open_request(
+            search_body="""
+            <html>
+              <body>
+                <div class="result">
+                  <a class="result__a" href="https://news.example.com/article/tech-update">
+                    Tech Update
+                  </a>
+                  <div class="result__snippet">
+                    Major technology companies announced record quarterly earnings.
+                  </div>
+                </div>
+              </body>
+            </html>
+            """,
+            page_bodies={
+                "https://news.example.com/article/tech-update": """
+                <html><body><article>
+                <p>Retrouvez toute l'actualite tech et innovation sur notre plateforme d'information en continu.</p>
+                <p>Suivez l'actualite du numerique et de la tech chaque jour avec nos journalistes specialises.</p>
+                <p>Apple reported a 12 percent increase in quarterly revenue driven by strong iPhone and services demand.</p>
+                <p>Microsoft announced record cloud revenue as enterprise customers accelerated Azure adoption.</p>
+                </article></body></html>
+                """,
+            },
+        ),
+    )
+
+    result = executor.execute(
+        ToolCall(
+            tool_name="search_web",
+            arguments={"query": "tech company earnings results"},
+        )
+    )
+
+    assert result.success is True
+    # Factual content should be kept
+    assert "Apple" in result.output_text or "Microsoft" in result.output_text
+    # Site-descriptive passages must not appear in summary
+    summary_section = result.output_text.split("Sources:")[0]
+    assert "retrouvez" not in summary_section.lower()
+    assert "suivez l" not in summary_section.lower()
+
+
+def test_search_tool_penalizes_homepage_results(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    executor = ToolExecutor.with_default_tools(settings)
+
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools.socket.getaddrinfo",
+        lambda host, port, type=socket.SOCK_STREAM: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
+        ],
+    )
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools._open_request",
+        _build_search_open_request(
+            search_body="""
+            <html>
+              <body>
+                <div class="result">
+                  <a class="result__a" href="https://example.com/">
+                    Example News
+                  </a>
+                  <div class="result__snippet">
+                    Your daily source for breaking news and analysis.
+                  </div>
+                </div>
+                <div class="result">
+                  <a class="result__a" href="https://example.com/article/2025/03/14/space-mission">
+                    Space Mission Update
+                  </a>
+                  <div class="result__snippet">
+                    NASA launched its latest deep space mission on Thursday.
+                  </div>
+                </div>
+              </body>
+            </html>
+            """,
+            page_bodies={
+                "https://example.com/": """
+                <html><body>
+                <nav>Home News Sports Tech Entertainment</nav>
+                <p>Breaking: Markets close higher today.</p>
+                </body></html>
+                """,
+                "https://example.com/article/2025/03/14/space-mission": """
+                <html><body><article>
+                <p>NASA successfully launched the Artemis IV mission from Kennedy Space Center on Thursday morning.</p>
+                <p>The crew of four astronauts will spend 30 days in lunar orbit testing new life support systems.</p>
+                </article></body></html>
+                """,
+            },
+        ),
+    )
+
+    result = executor.execute(
+        ToolCall(
+            tool_name="search_web",
+            arguments={"query": "NASA space mission launch"},
+        )
+    )
+
+    assert result.success is True
+    # The article content should appear, not the homepage noise
+    assert "Artemis" in result.output_text or "NASA" in result.output_text
+    # The article source should be ranked higher than the homepage
+    sources_section = result.output_text.split("Sources:")[1] if "Sources:" in result.output_text else ""
+    if "Space Mission Update" in sources_section and "Example News" in sources_section:
+        article_pos = sources_section.index("Space Mission Update")
+        homepage_pos = sources_section.index("Example News")
+        assert article_pos < homepage_pos
+
+
+def test_search_tool_summary_deduplicates_near_identical_bullets(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    executor = ToolExecutor.with_default_tools(settings)
+
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools.socket.getaddrinfo",
+        lambda host, port, type=socket.SOCK_STREAM: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
+        ],
+    )
+    monkeypatch.setattr(
+        "unclaw.tools.web_tools._open_request",
+        _build_search_open_request(
+            search_body="""
+            <html>
+              <body>
+                <div class="result">
+                  <a class="result__a" href="https://alpha.example.com/article/merger">
+                    Alpha News Merger
+                  </a>
+                  <div class="result__snippet">
+                    Company X announced a merger with Company Y valued at 5 billion dollars.
+                  </div>
+                </div>
+                <div class="result">
+                  <a class="result__a" href="https://beta.example.com/post/merger-deal">
+                    Beta Coverage Merger
+                  </a>
+                  <div class="result__snippet">
+                    Company X and Company Y confirmed a merger deal worth approximately 5 billion dollars.
+                  </div>
+                </div>
+                <div class="result">
+                  <a class="result__a" href="https://gamma.example.com/report/market-analysis">
+                    Gamma Market Report
+                  </a>
+                  <div class="result__snippet">
+                    Market analysts expect the merger to reshape the logistics industry over the next decade.
+                  </div>
+                </div>
+              </body>
+            </html>
+            """,
+            page_bodies={
+                "https://alpha.example.com/article/merger": """
+                <html><body><article>
+                <p>Company X announced a definitive merger agreement with Company Y valued at approximately 5 billion dollars.</p>
+                <p>The combined entity will serve over 40 million customers across 12 countries in the logistics sector.</p>
+                </article></body></html>
+                """,
+                "https://beta.example.com/post/merger-deal": """
+                <html><body><article>
+                <p>Company X and Company Y officially confirmed their merger deal worth approximately 5 billion dollars today.</p>
+                <p>Regulators are expected to review the transaction over the next 6 to 8 months before final approval.</p>
+                </article></body></html>
+                """,
+                "https://gamma.example.com/report/market-analysis": """
+                <html><body><article>
+                <p>Market analysts expect the Company X and Company Y merger to reshape the global logistics industry.</p>
+                <p>Competing firms have already started exploring counter-strategies and potential acquisitions of their own.</p>
+                </article></body></html>
+                """,
+            },
+        ),
+    )
+
+    result = executor.execute(
+        ToolCall(
+            tool_name="search_web",
+            arguments={"query": "Company X Company Y merger"},
+        )
+    )
+
+    assert result.success is True
+    summary_section = result.output_text.split("Sources:")[0]
+    # Count how many times the near-identical merger announcement appears in summary
+    merger_bullet_count = sum(
+        1 for line in summary_section.splitlines()
+        if line.startswith("- ") and "merger" in line.lower() and "5 billion" in line.lower()
+    )
+    # Near-identical facts should be deduplicated: at most 1 bullet about the 5B merger
+    assert merger_bullet_count <= 1
+    # But distinct findings should still appear
+    assert "Sources:" in result.output_text
+
+
 def _create_temp_project(tmp_path: Path) -> Path:
     source_root = Path(__file__).resolve().parents[1]
     project_root = tmp_path / "project"

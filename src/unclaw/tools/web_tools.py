@@ -125,6 +125,49 @@ _MATCH_BOILERPLATE_PREFIXES = (
     "sign in",
     "skip to",
 )
+_NOISE_SIGNAL_PHRASES = frozenset(
+    {
+        "accept cookies",
+        "accepter les cookies",
+        "acceder aux notifications",
+        "account settings",
+        "all rights reserved",
+        "conditions generales",
+        "consentement",
+        "cookie policy",
+        "cookie preferences",
+        "creer un compte",
+        "data protection",
+        "donnees personnelles",
+        "en poursuivant",
+        "en savoir plus et gerer",
+        "gerer les cookies",
+        "gerer mes preferences",
+        "inscription gratuite",
+        "log in to",
+        "manage preferences",
+        "mon compte",
+        "newsletter signup",
+        "nos partenaires",
+        "notre politique",
+        "nous utilisons des cookies",
+        "parametres de confidentialite",
+        "partenaires data",
+        "politique de confidentialite",
+        "privacy policy",
+        "privacy settings",
+        "se connecter",
+        "sign in to",
+        "sign up for",
+        "subscribe to",
+        "terms of service",
+        "tous droits reserves",
+        "use of cookies",
+        "utilisation de cookies",
+        "votre consentement",
+        "your privacy",
+    }
+)
 _QUERY_STOPWORDS = frozenset(
     {
         "a",
@@ -1067,10 +1110,12 @@ def _score_search_result(
     if _url_looks_article_like(url):
         score += 4.0
     if _url_looks_archive_like(url):
-        score += 1.5
+        score += 1.0
     if _url_looks_homepage_like(url):
-        score -= 4.0
+        score -= 6.0
     if _looks_generic_result_title(title=title, hostname=parsed_url.hostname or ""):
+        score -= 3.0
+    if _passage_has_noise_signals(snippet):
         score -= 2.0
 
     return score
@@ -1397,6 +1442,9 @@ def _score_evidence_text(
         score -= 2.5
     if _looks_boilerplate_text(text):
         score -= 3.0
+    score -= _passage_noise_score(text)
+    if _looks_site_descriptive(text):
+        score -= 2.0
     return score
 
 
@@ -1516,14 +1564,16 @@ def _score_fetched_page(
 
     hub_score = 0.0
     if _url_looks_homepage_like(page.resolved_url):
-        hub_score += 1.5
+        hub_score += 2.5
     if _url_looks_archive_like(page.resolved_url):
-        hub_score += 1.0
-    hub_score += min(internal_link_count / 6.0, 3.0)
+        hub_score += 1.5
+    hub_score += min(internal_link_count / 5.0, 3.5)
     if informative_passage_count <= 1:
-        hub_score += 1.0
+        hub_score += 1.5
     if len(page_tokens) < 120 and internal_link_count >= 4:
-        hub_score += 1.0
+        hub_score += 1.5
+    if internal_link_count >= 12 and len(page_tokens) < 200:
+        hub_score += 2.0
     if _url_looks_article_like(page.resolved_url):
         hub_score -= 0.8
 
@@ -1721,7 +1771,13 @@ def _is_informative_passage(text: str, *, title: str) -> bool:
         return False
 
     lowered = _fold_for_match(text)
-    return not lowered.startswith(_MATCH_BOILERPLATE_PREFIXES)
+    if lowered.startswith(_MATCH_BOILERPLATE_PREFIXES):
+        return False
+    if _passage_has_noise_signals(text):
+        return False
+    if _looks_site_descriptive(text):
+        return False
+    return True
 
 
 def _looks_low_value_page(
@@ -1733,13 +1789,22 @@ def _looks_low_value_page(
 ) -> bool:
     if not text or text == "[empty response body]":
         return True
-    if len(_text_tokens(text)) < 18:
+    token_count = len(_text_tokens(text))
+    if token_count < 18:
         return True
     if _looks_like_title_echo(text, title):
         return True
-    if _url_looks_homepage_like(url) and len(_text_tokens(text)) < 80:
+    if _url_looks_homepage_like(url) and token_count < 80:
         return True
-    return link_count >= 8 and len(_text_tokens(text)) < 120
+    if link_count >= 8 and token_count < 120:
+        return True
+    # Hub/index pages with very high link-to-content ratio
+    if link_count >= 12 and token_count < 200:
+        return True
+    # Pages that are mostly navigation noise
+    if _passage_has_noise_signals(text) and token_count < 100:
+        return True
+    return False
 
 
 def _looks_like_title_echo(text: str, title: str) -> bool:
@@ -1767,6 +1832,49 @@ def _looks_boilerplate_text(text: str) -> bool:
     return folded_text.startswith(_MATCH_BOILERPLATE_PREFIXES)
 
 
+def _looks_site_descriptive(text: str) -> bool:
+    """Return True if the passage merely describes the site or section rather than conveying facts."""
+    folded = _fold_for_match(text)
+    _SITE_DESCRIPTIVE_CUES = (
+        "retrouvez toute l",
+        "retrouvez toutes les",
+        "suivez l actualite",
+        "toute l actualite",
+        "toutes les actualites",
+        "toute l information",
+        "decouvrez les dernieres",
+        "bienvenue sur",
+        "welcome to our",
+        "visit our",
+        "follow us on",
+        "suivez nous sur",
+        "retrouvez nous sur",
+        "abonnez vous",
+        "stay up to date",
+        "stay informed",
+    )
+    return any(cue in folded for cue in _SITE_DESCRIPTIVE_CUES)
+
+
+def _passage_has_noise_signals(text: str) -> bool:
+    """Return True if the passage contains UI, consent, or navigation noise."""
+    folded = _fold_for_match(text)
+    return any(phrase in folded for phrase in _NOISE_SIGNAL_PHRASES)
+
+
+def _passage_noise_score(text: str) -> float:
+    """Return a penalty score (0.0 = clean, higher = noisier) for UI/consent noise."""
+    folded = _fold_for_match(text)
+    hits = sum(1 for phrase in _NOISE_SIGNAL_PHRASES if phrase in folded)
+    if hits == 0:
+        return 0.0
+    tokens = folded.split()
+    if not tokens:
+        return 0.0
+    # Scale penalty: more hits or shorter text = higher noise ratio
+    return min(hits * 3.0, 9.0)
+
+
 def _truncate_sentences(text: str, *, max_sentences: int, max_chars: int) -> str:
     sentences = [
         sentence.strip()
@@ -1788,18 +1896,57 @@ def _build_search_summary_points(
     if not evidence_items:
         return ()
 
-    points: list[str] = []
-    seen_signatures: set[tuple[str, ...]] = set()
+    # Build keyword-only signatures for tighter semantic dedup in summaries.
+    # Strips function words so the overlap coefficient catches near-identical
+    # facts even when phrased differently across sources.
+    def _content_words(item: _EvidenceItem) -> frozenset[str]:
+        all_tokens = _text_tokens(item.text)
+        return frozenset(t for t in all_tokens if t not in _QUERY_STOPWORDS and len(t) > 2)
+
+    def _summary_overlap(a: frozenset[str], b: frozenset[str]) -> float:
+        if not a or not b:
+            return 0.0
+        return len(a & b) / min(len(a), len(b))
+
+    # Build candidate pool: deduplicate semantically across sources
+    selected: list[_EvidenceItem] = []
+    selected_content_sigs: list[frozenset[str]] = []
     for evidence in evidence_items:
-        signature = evidence.signature_tokens[:12]
-        if signature in seen_signatures:
+        content_sig = _content_words(evidence)
+        # Skip if too similar to an already-selected point
+        if any(
+            _summary_overlap(content_sig, existing_sig) >= 0.50
+            for existing_sig in selected_content_sigs
+        ):
             continue
-        seen_signatures.add(signature)
-        points.append(_clip_text(evidence.text, limit=_MAX_SUMMARY_POINT_CHARS))
-        if len(points) >= _MAX_SUMMARY_POINTS:
+        selected.append(evidence)
+        selected_content_sigs.append(content_sig)
+        if len(selected) >= _MAX_SUMMARY_POINTS:
             break
 
-    return tuple(points)
+    # If we have room, favor source diversity: add items from unseen sources
+    if len(selected) < _MAX_SUMMARY_POINTS:
+        seen_domains = {urlparse(item.url).hostname for item in selected}
+        for evidence in evidence_items:
+            if len(selected) >= _MAX_SUMMARY_POINTS:
+                break
+            domain = urlparse(evidence.url).hostname
+            if domain in seen_domains:
+                continue
+            content_sig = _content_words(evidence)
+            if any(
+                _summary_overlap(content_sig, existing_sig) >= 0.50
+                for existing_sig in selected_content_sigs
+            ):
+                continue
+            selected.append(evidence)
+            selected_content_sigs.append(content_sig)
+            seen_domains.add(domain)
+
+    return tuple(
+        _clip_text(item.text, limit=_MAX_SUMMARY_POINT_CHARS)
+        for item in selected
+    )
 
 
 def _format_search_results(
