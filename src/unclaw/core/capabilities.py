@@ -111,7 +111,7 @@ def _build_available_tool_lines(summary: RuntimeCapabilitySummary) -> tuple[str,
     if summary.web_search_available:
         lines.append(
             "/search <query>: search the public web, read a few relevant pages, "
-            "and return a grounded summary with sources."
+            "and answer naturally from grounded web context with compact sources."
         )
     return tuple(lines)
 

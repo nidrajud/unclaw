@@ -19,6 +19,11 @@ import yaml
 from unclaw.bootstrap import bootstrap
 from unclaw.core.command_handler import CommandHandler, CommandResult, CommandStatus
 from unclaw.core.executor import ToolExecutor
+from unclaw.core.research_flow import (
+    is_search_tool_call,
+    persist_tool_result,
+    run_search_then_answer,
+)
 from unclaw.core.runtime import run_user_turn
 from unclaw.core.session_manager import SessionManager
 from unclaw.errors import ConfigurationError, UnclawError
@@ -428,27 +433,41 @@ class TelegramBotChannel:
         if result.list_tools:
             reply_text = _format_tool_list(self.tool_executor.list_tools())
         elif result.tool_call is not None:
-            self.tracer.trace_tool_started(
-                session_id=bound_session_id,
-                tool_name=result.tool_call.tool_name,
-                arguments=result.tool_call.arguments,
-            )
-            tool_started_at = time.perf_counter()
-            tool_result = self.tool_executor.execute(result.tool_call)
-            self.tracer.trace_tool_finished(
-                session_id=bound_session_id,
-                tool_name=result.tool_call.tool_name,
-                success=tool_result.success,
-                output_length=len(tool_result.output_text),
-                error=tool_result.error,
-                tool_duration_ms=_elapsed_ms(tool_started_at),
-            )
-            _persist_tool_result(
-                session_manager=self.session_manager,
-                session_id=bound_session_id,
-                result=tool_result,
-            )
-            reply_text = _format_tool_result(tool_result)
+            if is_search_tool_call(result.tool_call):
+                reply_text = run_search_then_answer(
+                    session_manager=self.session_manager,
+                    command_handler=command_handler,
+                    tracer=self.tracer,
+                    tool_executor=self.tool_executor,
+                    tool_call=result.tool_call,
+                ).assistant_reply
+                _refresh_memory_summary(
+                    memory_manager=self.memory_manager,
+                    session_id=bound_session_id,
+                )
+            else:
+                self.tracer.trace_tool_started(
+                    session_id=bound_session_id,
+                    tool_name=result.tool_call.tool_name,
+                    arguments=result.tool_call.arguments,
+                )
+                tool_started_at = time.perf_counter()
+                tool_result = self.tool_executor.execute(result.tool_call)
+                self.tracer.trace_tool_finished(
+                    session_id=bound_session_id,
+                    tool_name=result.tool_call.tool_name,
+                    success=tool_result.success,
+                    output_length=len(tool_result.output_text),
+                    error=tool_result.error,
+                    tool_duration_ms=_elapsed_ms(tool_started_at),
+                )
+                persist_tool_result(
+                    session_manager=self.session_manager,
+                    session_id=bound_session_id,
+                    result=tool_result,
+                    tool_call=result.tool_call,
+                )
+                reply_text = _format_tool_result(tool_result)
         elif result.should_exit:
             reply_text = "The Telegram bot keeps running. Use /help to see commands."
         else:
@@ -476,10 +495,10 @@ class TelegramBotChannel:
             user_input=text,
             tracer=self.tracer,
         )
-        try:
-            self.memory_manager.build_or_refresh_session_summary(session_id)
-        except UnclawError as exc:
-            LOGGER.warning("Could not refresh session summary for %s: %s", session_id, exc)
+        _refresh_memory_summary(
+            memory_manager=self.memory_manager,
+            session_id=session_id,
+        )
 
         self._persist_chat_binding(chat_id, session_id=session_id)
         self._send_reply(chat_id=chat_id, text=assistant_reply)
@@ -1003,35 +1022,19 @@ def _format_tool_result(result: ToolResult) -> str:
     return "\n".join([f"Error: {first_line}", *other_lines])
 
 
-def _persist_tool_result(
+def _refresh_memory_summary(
     *,
-    session_manager,
+    memory_manager,
     session_id: str,
-    result: ToolResult,
 ) -> None:
-    add_message = getattr(session_manager, "add_message", None)
-    if not callable(add_message):
-        return
-    if not result.output_text.strip():
+    refresh_summary = getattr(memory_manager, "build_or_refresh_session_summary", None)
+    if not callable(refresh_summary):
         return
 
-    add_message(
-        MessageRole.TOOL,
-        _build_tool_history_content(result),
-        session_id=session_id,
-    )
-
-
-def _build_tool_history_content(result: ToolResult) -> str:
-    outcome = "success" if result.success else "error"
-    return "\n".join(
-        [
-            f"Tool: {result.tool_name}",
-            f"Outcome: {outcome}",
-            "",
-            result.output_text.strip(),
-        ]
-    )
+    try:
+        refresh_summary(session_id)
+    except UnclawError as exc:
+        LOGGER.warning("Could not refresh session summary for %s: %s", session_id, exc)
 
 
 def _split_message_chunks(text: str, *, limit: int = _MESSAGE_LIMIT) -> list[str]:

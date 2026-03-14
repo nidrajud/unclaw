@@ -10,6 +10,11 @@ from time import perf_counter
 from unclaw.bootstrap import bootstrap
 from unclaw.core.command_handler import CommandHandler, CommandResult, CommandStatus
 from unclaw.core.executor import ToolExecutor
+from unclaw.core.research_flow import (
+    is_search_tool_call,
+    persist_tool_result,
+    run_search_then_answer,
+)
 from unclaw.core.runtime import run_user_turn
 from unclaw.core.session_manager import SessionManager
 from unclaw.errors import UnclawError
@@ -171,6 +176,21 @@ def run_cli(
                 _render_tool_list(tool_executor.list_tools())
                 continue
             if result.tool_call is not None:
+                if is_search_tool_call(result.tool_call):
+                    assistant_reply = run_search_then_answer(
+                        session_manager=session_manager,
+                        command_handler=command_handler,
+                        tracer=tracer,
+                        tool_executor=tool_executor,
+                        tool_call=result.tool_call,
+                    ).assistant_reply
+                    _render_assistant_reply(assistant_reply)
+                    _refresh_session_summary(
+                        memory_manager=memory_manager,
+                        session_id=session_manager.ensure_current_session().id,
+                    )
+                    continue
+
                 session = session_manager.ensure_current_session()
                 tracer.trace_tool_started(
                     session_id=session.id,
@@ -187,10 +207,11 @@ def run_cli(
                     error=tool_result.error,
                     tool_duration_ms=_elapsed_ms(tool_started_at),
                 )
-                _persist_tool_result(
+                persist_tool_result(
                     session_manager=session_manager,
                     session_id=session.id,
                     result=tool_result,
+                    tool_call=result.tool_call,
                 )
                 _render_tool_result(tool_result)
                 continue
@@ -214,10 +235,10 @@ def run_cli(
             stream_output_func=assistant_stream.write,
         )
         assistant_stream.finish(assistant_reply)
-        try:
-            memory_manager.build_or_refresh_session_summary(session.id)
-        except UnclawError as exc:
-            print(f"Warning: could not refresh session summary: {exc}")
+        _refresh_session_summary(
+            memory_manager=memory_manager,
+            session_id=session.id,
+        )
 
 
 def _print_banner(
@@ -329,32 +350,23 @@ def _render_tool_result(result: ToolResult) -> None:
         print(line)
 
 
-def _persist_tool_result(
+def _render_assistant_reply(reply_text: str) -> None:
+    print(f"Unclaw> {reply_text}")
+
+
+def _refresh_session_summary(
     *,
-    session_manager: SessionManager,
+    memory_manager: MemoryManager,
     session_id: str,
-    result: ToolResult,
 ) -> None:
-    if not result.output_text.strip():
+    refresh_summary = getattr(memory_manager, "build_or_refresh_session_summary", None)
+    if not callable(refresh_summary):
         return
 
-    session_manager.add_message(
-        MessageRole.TOOL,
-        _build_tool_history_content(result),
-        session_id=session_id,
-    )
-
-
-def _build_tool_history_content(result: ToolResult) -> str:
-    outcome = "success" if result.success else "error"
-    return "\n".join(
-        [
-            f"Tool: {result.tool_name}",
-            f"Outcome: {outcome}",
-            "",
-            result.output_text.strip(),
-        ]
-    )
+    try:
+        refresh_summary(session_id)
+    except UnclawError as exc:
+        print(f"Warning: could not refresh session summary: {exc}")
 
 
 def _elapsed_ms(started_at: float) -> int:

@@ -34,7 +34,7 @@ def test_help_lists_enriched_commands_for_cli() -> None:
     )
     assert "/fetch <url>      Fetch one public URL." in result.lines
     assert (
-        "/search <query>  Search the public web, read top sources, and return a compact summary."
+        "/search <query>  Search the public web, ground the answer, and append compact sources."
         in result.lines
     )
     assert "/session  Show the current session state." in result.lines

@@ -342,7 +342,7 @@ class CommandHandler:
             "/read <path>      Read one local file inside allowed roots.",
             "/ls [path]        List one local directory inside allowed roots. Defaults to the current directory.",
             "/fetch <url>      Fetch one public URL.",
-            "/search <query>  Search the public web, read top sources, and return a compact summary.",
+            "/search <query>  Search the public web, ground the answer, and append compact sources.",
             "",
             "Memory:",
             "/session  Show the current session state.",

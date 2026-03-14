@@ -503,6 +503,10 @@ def search_web(call: ToolCall) -> ToolResult:
         query=search_query,
     )
     summary_points = tuple(finding.text for finding in synthesis.findings)
+    display_sources = _select_output_sources(
+        sources=outcome.sources,
+        synthesis=synthesis,
+    )
     output_text = _format_search_results(
         query=query,
         outcome=outcome,
@@ -525,6 +529,13 @@ def search_web(call: ToolCall) -> ToolResult:
             "fact_cluster_count": len(synthesis.fact_clusters),
             "finding_count": len(synthesis.findings),
             "summary_points": list(summary_points),
+            "display_sources": [
+                {
+                    "title": source.title,
+                    "url": source.url,
+                }
+                for source in display_sources
+            ],
             "synthesized_findings": [
                 {
                     "text": finding.text,

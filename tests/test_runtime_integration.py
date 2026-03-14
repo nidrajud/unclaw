@@ -11,6 +11,7 @@ from unclaw.core.capabilities import (
     build_runtime_capability_summary,
 )
 from unclaw.core.command_handler import CommandHandler
+from unclaw.core.research_flow import run_search_then_answer
 from unclaw.core.runtime import run_user_turn
 from unclaw.core.session_manager import SessionManager
 from unclaw.llm.base import LLMMessage, LLMResponse, LLMRole
@@ -122,7 +123,7 @@ def test_run_user_turn_persists_reply_and_emits_runtime_events(
         assert "/fetch <url>" in provider_messages[1].content
         assert (
             "/search <query>: search the public web, read a few relevant pages, "
-            "and return a grounded summary with sources."
+            "and answer naturally from grounded web context with compact sources."
             in provider_messages[1].content
         )
         assert "Session memory and summary access." in provider_messages[1].content
@@ -269,6 +270,165 @@ def test_run_user_turn_includes_prior_tool_output_for_follow_up_questions(
         assert provider_messages[-1].role is LLMRole.USER
         assert provider_messages[-1].content == "Summarize that more briefly."
         assert "Do not say you cannot access it" in provider_messages[1].content
+    finally:
+        session_manager.close()
+
+
+def test_run_search_then_answer_grounds_a_natural_reply_and_preserves_follow_up_context(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+    captured_messages: list[list[LLMMessage]] = []
+    reply_texts = iter(
+        [
+            "Ollama shipped a new update with improved search grounding.",
+            "Shorter recap.",
+        ]
+    )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+        ):
+            del profile, timeout_seconds, thinking_enabled, content_callback
+            captured_messages.append(list(messages))
+            return LLMResponse(
+                provider="ollama",
+                model_name="qwen3.5:4b",
+                content=next(reply_texts),
+                created_at="2026-03-13T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    search_tool_result = ToolResult.ok(
+        tool_name="search_web",
+        output_text=(
+            "Search query: latest news about Ollama\n"
+            "Sources fetched: 2 of 2 attempted\n"
+            "Evidence kept: 4\n"
+        ),
+        payload={
+            "query": "latest news about Ollama",
+            "summary_points": [
+                "Ollama shipped a new update with improved search grounding."
+            ],
+            "display_sources": [
+                {
+                    "title": "Ollama Blog",
+                    "url": "https://ollama.com/blog/search-update",
+                },
+                {
+                    "title": "Release Notes",
+                    "url": "https://example.com/releases/ollama-search",
+                },
+            ],
+        },
+    )
+
+    try:
+        session = session_manager.ensure_current_session()
+
+        search_reply = run_search_then_answer(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            tracer=tracer,
+            tool_executor=SimpleNamespace(
+                execute=lambda _tool_call: search_tool_result,
+                registry=ToolRegistry(),
+            ),
+            tool_call=SimpleNamespace(
+                tool_name="search_web",
+                arguments={"query": "latest news about Ollama"},
+            ),
+        ).assistant_reply
+
+        assert search_reply == (
+            "Ollama shipped a new update with improved search grounding.\n\n"
+            "Sources:\n"
+            "- Ollama Blog: https://ollama.com/blog/search-update\n"
+            "- Release Notes: https://example.com/releases/ollama-search"
+        )
+        assert "Search query:" not in search_reply
+        assert "Sources fetched:" not in search_reply
+        assert "Evidence kept:" not in search_reply
+
+        stored_messages = session_manager.list_messages(session.id)
+        assert [message.role for message in stored_messages] == [
+            MessageRole.USER,
+            MessageRole.TOOL,
+            MessageRole.ASSISTANT,
+        ]
+        assert stored_messages[0].content == "latest news about Ollama"
+        assert "Search query:" not in stored_messages[1].content
+        assert "Evidence kept:" not in stored_messages[1].content
+        assert "Findings:" in stored_messages[1].content
+        assert "Sources:" in stored_messages[1].content
+
+        search_turn_messages = captured_messages[0]
+        tool_messages = [
+            message.content
+            for message in search_turn_messages
+            if message.role is LLMRole.TOOL
+        ]
+        assert tool_messages == [stored_messages[1].content]
+        assert search_turn_messages[-1].role is LLMRole.TOOL
+        assert sum(
+            1
+            for message in search_turn_messages
+            if message.role is LLMRole.USER
+            and message.content == "latest news about Ollama"
+        ) == 1
+
+        session_manager.add_message(
+            MessageRole.USER,
+            "Summarize that more briefly.",
+            session_id=session.id,
+        )
+
+        follow_up_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Summarize that more briefly.",
+            tracer=tracer,
+        )
+
+        assert follow_up_reply == "Shorter recap."
+        follow_up_messages = captured_messages[1]
+        assert any(
+            message.role is LLMRole.TOOL
+            and "Ollama Blog: https://ollama.com/blog/search-update" in message.content
+            for message in follow_up_messages
+        )
     finally:
         session_manager.close()
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from time import perf_counter
 from typing import TYPE_CHECKING
 
@@ -40,6 +41,7 @@ def run_user_turn(
     event_bus: EventBus | None = None,
     stream_output_func: LLMContentCallback | None = None,
     tool_registry: ToolRegistry | None = None,
+    assistant_reply_transform: Callable[[str], str] | None = None,
 ) -> str:
     """Run the minimal runtime path and persist the assistant reply."""
     session = session_manager.ensure_current_session()
@@ -136,6 +138,9 @@ def run_user_turn(
             error=str(exc),
         )
         assistant_reply = _RUNTIME_ERROR_REPLY
+
+    if assistant_reply_transform is not None:
+        assistant_reply = assistant_reply_transform(assistant_reply)
 
     session_manager.add_message(
         MessageRole.ASSISTANT,

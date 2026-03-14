@@ -71,8 +71,11 @@ def _should_append_current_user_message(
     if not history:
         return True
 
-    latest_message = history[-1]
-    if latest_message.role is not MessageRole.USER:
-        return True
+    for message in reversed(history):
+        if message.role is MessageRole.TOOL:
+            continue
+        if message.role is not MessageRole.USER:
+            return True
+        return message.content.strip() != user_message
 
-    return latest_message.content.strip() != user_message
+    return True
