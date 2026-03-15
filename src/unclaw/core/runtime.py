@@ -235,9 +235,37 @@ _PLANNING_NARRATION_PATTERNS = (
     re.compile(r'^\s*\{["\'](?:capability|tool_name|query)["\']:', flags=re.MULTILINE),
 )
 
+# Retrieval debris patterns: generic boilerplate fragments from stitched results
+_RETRIEVAL_DEBRIS_PATTERNS = (
+    # English boilerplate that leaks into non-English answers
+    re.compile(
+        r"^Some (?:profile |lower-confidence )?details?.*"
+        r"(?:not |were )(?:confirmed|verified|omitted|found|available).*$",
+        flags=re.IGNORECASE | re.MULTILINE,
+    ),
+    re.compile(
+        r"^(?:Additional details? (?:could not|couldn't) be (?:confirmed|verified)"
+        r"|(?:No|The) (?:additional|further) (?:details?|information) (?:were|was) (?:found|available)"
+        r").*$",
+        flags=re.IGNORECASE | re.MULTILINE,
+    ),
+    # Raw tool output lines that leak into replies
+    re.compile(
+        r"^(?:Sources? (?:fetched|checked|retrieved):\s*\d.*"
+        r"|Evidence (?:kept|extracted):\s*\d.*"
+        r"|Search query:\s*.+)$",
+        flags=re.IGNORECASE | re.MULTILINE,
+    ),
+    # Dangling fragments: very short lines that look like snippet debris
+    re.compile(
+        r"^(?:\.{2,}|…|---+|___+)\s*$",
+        flags=re.MULTILINE,
+    ),
+)
+
 
 def _agent_reply_sanitizer(reply_text: str) -> str:
-    """Strip internal planning narration and tool commands from agent replies."""
+    """Strip internal planning narration, tool commands, and retrieval debris."""
     stripped = reply_text.strip()
 
     # Silent fallback: if the entire reply is a raw JSON object (structured
@@ -258,6 +286,12 @@ def _agent_reply_sanitizer(reply_text: str) -> str:
 
     cleaned = stripped
     for pattern in _PLANNING_NARRATION_PATTERNS:
+        lines = cleaned.split("\n")
+        filtered = [line for line in lines if not pattern.match(line.strip())]
+        cleaned = "\n".join(filtered)
+
+    # Remove retrieval debris fragments
+    for pattern in _RETRIEVAL_DEBRIS_PATTERNS:
         lines = cleaned.split("\n")
         filtered = [line for line in lines if not pattern.match(line.strip())]
         cleaned = "\n".join(filtered)

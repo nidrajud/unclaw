@@ -2128,6 +2128,549 @@ def test_slash_commands_still_work_after_routing_changes(
         session_manager.close()
 
 
+def test_pending_clarification_resumes_web_research(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """After assistant asks clarification, one-word 'internet' → web research."""
+    from unclaw.core.executor import create_default_tool_registry
+
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    event_bus = EventBus()
+    published_events: list[TraceEvent] = []
+    event_bus.subscribe(published_events.append)
+    tracer = Tracer(
+        event_bus=event_bus,
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def chat(self, profile, messages, **kwargs):
+            del kwargs
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="Marine Leleu est une sportive française.",
+                created_at="2026-03-14T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    search_tool_result = ToolResult.ok(
+        tool_name="search_web",
+        output_text="Search query: internet\n",
+        payload={
+            "query": "internet",
+            "summary_points": ["Marine Leleu est une sportive française."],
+            "display_sources": [
+                {"title": "Bio", "url": "https://example.com/bio"},
+            ],
+        },
+    )
+
+    default_registry = create_default_tool_registry(settings)
+
+    try:
+        session = session_manager.ensure_current_session()
+        # Setup: user asked a question, assistant asked clarification
+        session_manager.add_message(
+            MessageRole.USER,
+            "fais des recherches sur Marine Leleu",
+            session_id=session.id,
+        )
+        session_manager.add_message(
+            MessageRole.ASSISTANT,
+            "Souhaitez-vous que je cherche sur internet ou dans vos fichiers locaux ?",
+            session_id=session.id,
+        )
+        # User answers with a single word
+        session_manager.add_message(
+            MessageRole.USER,
+            "internet",
+            session_id=session.id,
+        )
+
+        assistant_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="internet",
+            tracer=tracer,
+            tool_executor=SimpleNamespace(
+                execute=lambda _: search_tool_result,
+                registry=default_registry,
+            ),
+        )
+
+        # The reply should contain the search result, NOT another question
+        route_events = [
+            e for e in published_events if e.event_type == "route.selected"
+        ]
+        assert len(route_events) == 1
+        assert route_events[0].payload["route_kind"] == "web_research"
+        assert route_events[0].payload["route_source"] == "pending_clarification"
+        assert "sportive" in assistant_reply.lower() or "marine" in assistant_reply.lower()
+    finally:
+        session_manager.close()
+
+
+def test_subject_continuation_wikipedia_triggers_web_research_with_subject(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """After person search, 'cherche sur Wikipédia' → web research (subject continuation)."""
+    from unclaw.core.executor import create_default_tool_registry
+
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    event_bus = EventBus()
+    published_events: list[TraceEvent] = []
+    event_bus.subscribe(published_events.append)
+    tracer = Tracer(
+        event_bus=event_bus,
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def chat(self, profile, messages, **kwargs):
+            del kwargs
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="Voici plus de détails depuis Wikipédia.",
+                created_at="2026-03-14T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    search_tool_result = ToolResult.ok(
+        tool_name="search_web",
+        output_text="Search query: cherche sur Wikipédia\n",
+        payload={
+            "query": "cherche sur Wikipédia",
+            "summary_points": ["Details from Wikipedia."],
+            "display_sources": [
+                {"title": "Wikipedia", "url": "https://fr.wikipedia.org/wiki/Marine_Leleu"},
+            ],
+        },
+    )
+
+    default_registry = create_default_tool_registry(settings)
+
+    try:
+        session = session_manager.ensure_current_session()
+        # Prior context: person search with results
+        session_manager.add_message(
+            MessageRole.USER,
+            "fais des recherches sur Marine Leleu",
+            session_id=session.id,
+        )
+        session_manager.add_message(
+            MessageRole.TOOL,
+            (
+                "Tool: search_web\nOutcome: success\n\n"
+                "Supported facts:\n"
+                "- [strong; 2 sources] Marine Leleu est une sportive française.\n"
+            ),
+            session_id=session.id,
+        )
+        session_manager.add_message(
+            MessageRole.ASSISTANT,
+            "Marine Leleu est une sportive française.",
+            session_id=session.id,
+        )
+        session_manager.add_message(
+            MessageRole.USER,
+            "cherche sur Wikipédia",
+            session_id=session.id,
+        )
+
+        assistant_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="cherche sur Wikipédia",
+            tracer=tracer,
+            tool_executor=SimpleNamespace(
+                execute=lambda _: search_tool_result,
+                registry=default_registry,
+            ),
+        )
+
+        route_events = [
+            e for e in published_events if e.event_type == "route.selected"
+        ]
+        assert len(route_events) == 1
+        assert route_events[0].payload["route_kind"] == "web_research"
+        assert route_events[0].payload["route_source"] == "subject_continuation"
+    finally:
+        session_manager.close()
+
+
+def test_freshness_news_request_auto_triggers_web_research(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """'Résumé des actualités du jour' in Agent mode → reliable web research."""
+    from unclaw.core.executor import create_default_tool_registry
+
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    event_bus = EventBus()
+    published_events: list[TraceEvent] = []
+    event_bus.subscribe(published_events.append)
+    tracer = Tracer(
+        event_bus=event_bus,
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def chat(self, profile, messages, **kwargs):
+            del kwargs
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="Voici les actualités du jour.",
+                created_at="2026-03-14T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    search_tool_result = ToolResult.ok(
+        tool_name="search_web",
+        output_text="Search query: actualités du jour\n",
+        payload={
+            "query": "actualités du jour",
+            "summary_points": ["Today's key events."],
+            "display_sources": [
+                {"title": "News", "url": "https://example.com/news"},
+            ],
+        },
+    )
+
+    default_registry = create_default_tool_registry(settings)
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "fais moi un résumé des actualités importantes du jour",
+            session_id=session.id,
+        )
+
+        assistant_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="fais moi un résumé des actualités importantes du jour",
+            tracer=tracer,
+            tool_executor=SimpleNamespace(
+                execute=lambda _: search_tool_result,
+                registry=default_registry,
+            ),
+        )
+
+        route_events = [
+            e for e in published_events if e.event_type == "route.selected"
+        ]
+        assert len(route_events) == 1
+        assert route_events[0].payload["route_kind"] == "web_research"
+        assert route_events[0].payload["route_source"] == "freshness_heuristic"
+    finally:
+        session_manager.close()
+
+
+def test_retrieval_debris_stripped_from_agent_reply(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Retrieval debris like 'Some profile details...' is cleaned from replies."""
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def chat(self, profile, messages, **kwargs):
+            del kwargs
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content=(
+                    "Marine Leleu est une sportive française.\n"
+                    "Some profile details were not confirmed.\n"
+                    "Sources fetched: 3 of 5 attempted\n"
+                    "Evidence kept: 2\n"
+                    "She is known for her athletic achievements."
+                ),
+                created_at="2026-03-14T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "Tell me about Marine Leleu.",
+            session_id=session.id,
+        )
+
+        assistant_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Tell me about Marine Leleu.",
+            tracer=tracer,
+            capability_router=_StaticCapabilityRouter(
+                CapabilityDecision(
+                    kind=CapabilityKind.DIRECT_ANSWER,
+                    confidence="high",
+                    source="test",
+                )
+            ),
+        )
+
+        assert "Some profile details" not in assistant_reply
+        assert "Sources fetched:" not in assistant_reply
+        assert "Evidence kept:" not in assistant_reply
+        assert "Marine Leleu" in assistant_reply
+        assert "athletic" in assistant_reply.lower()
+    finally:
+        session_manager.close()
+
+
+def test_chatbot_mode_preserves_slash_commands_and_no_auto_routing(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Chatbot mode: no auto routing, slash commands still work."""
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+
+    try:
+        command_handler = CommandHandler(
+            settings=settings,
+            session_manager=session_manager,
+            memory_manager=SimpleNamespace(),
+        )
+
+        # Slash commands should still work
+        result = command_handler.handle("/search test query about news")
+        assert result.tool_call is not None
+        assert result.tool_call.tool_name == "search_web"
+        assert "news" in result.tool_call.arguments["query"]
+
+        result = command_handler.handle("/help")
+        assert result.status.value == "ok"
+
+        # Direct route_request in chatbot mode should always return direct_answer
+        from unclaw.core.router import route_request, RouteKind
+        from unclaw.core.capabilities import build_runtime_capability_summary
+        from unclaw.core.runtime_modes import RuntimeMode
+        from unclaw.llm.base import ResolvedModelProfile, ModelCapabilities
+
+        chatbot_profile = ResolvedModelProfile(
+            name="chatbot_test",
+            provider="ollama",
+            model_name="test:1b",
+            temperature=0.5,
+            capabilities=ModelCapabilities(
+                thinking_supported=False,
+                tool_mode="none",
+                supports_tools=False,
+                supports_native_tool_calling=False,
+                supports_agent_mode=False,
+            ),
+        )
+        monkeypatch.setattr(
+            "unclaw.core.router.resolve_model_profile",
+            lambda s, n: chatbot_profile,
+        )
+
+        summary = build_runtime_capability_summary(
+            tool_registry=ToolRegistry(),
+            memory_summary_available=False,
+            runtime_mode=RuntimeMode.CHATBOT,
+        )
+
+        # Freshness query should NOT auto-trigger web in chatbot mode
+        route = route_request(
+            settings=settings,
+            model_profile_name="chatbot_test",
+            user_message="fais moi un résumé des actualités du jour",
+            capability_summary=summary,
+        )
+        assert route.kind is RouteKind.DIRECT_ANSWER
+        assert route.runtime_mode is RuntimeMode.CHATBOT
+    finally:
+        session_manager.close()
+
+
+def test_french_uncertainty_note_in_french_query(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Uncertainty notes should be in French when query is French."""
+    _freeze_search_grounding_date(monkeypatch)
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def chat(self, profile, messages, **kwargs):
+            del kwargs
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="Marine Leleu seems to be an inspiring person who often shares on podcasts.",
+                created_at="2026-03-14T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    search_tool_result = ToolResult.ok(
+        tool_name="search_web",
+        output_text="Search query: qui est Marine Leleu\n",
+        payload={
+            "query": "qui est Marine Leleu",
+            "synthesized_findings": [
+                {
+                    "text": "Marine Leleu est une sportive française.",
+                    "score": 8.0,
+                    "support_count": 2,
+                    "source_titles": ["Bio", "Sport"],
+                    "source_urls": [
+                        "https://example.com/bio",
+                        "https://example.com/sport",
+                    ],
+                },
+                {
+                    "text": "She appears on various podcasts.",
+                    "score": 3.5,
+                    "support_count": 1,
+                    "source_titles": ["Podcast"],
+                    "source_urls": ["https://example.com/podcast"],
+                },
+            ],
+            "display_sources": [
+                {"title": "Bio", "url": "https://example.com/bio"},
+                {"title": "Sport", "url": "https://example.com/sport"},
+            ],
+            "results": [
+                {
+                    "title": "Bio",
+                    "url": "https://example.com/bio",
+                    "fetched": True,
+                    "evidence_count": 1,
+                    "usefulness": 8.0,
+                    "used_snippet_fallback": False,
+                },
+                {
+                    "title": "Sport",
+                    "url": "https://example.com/sport",
+                    "fetched": True,
+                    "evidence_count": 1,
+                    "usefulness": 7.0,
+                    "used_snippet_fallback": False,
+                },
+            ],
+        },
+    )
+
+    try:
+        reply = run_search_then_answer(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            tracer=tracer,
+            tool_executor=SimpleNamespace(
+                execute=lambda _: search_tool_result,
+                registry=ToolRegistry(),
+            ),
+            tool_call=SimpleNamespace(
+                tool_name="search_web",
+                arguments={"query": "qui est Marine Leleu"},
+            ),
+        ).assistant_reply
+
+        # The answer should contain supported facts
+        assert "Marine Leleu" in reply
+        assert "sportive" in reply.lower()
+        # Uncertainty note should be in French since query was French
+        if "détails" in reply or "confirmé" in reply or "omis" in reply:
+            # French uncertainty note detected — good
+            assert "Some profile details" not in reply
+            assert "Some lower-confidence" not in reply
+        # No English boilerplate should appear
+        assert "inspiring" not in reply
+        assert "podcast" not in reply.lower().split("Sources:")[0]
+    finally:
+        session_manager.close()
+
+
 def _create_temp_project(tmp_path: Path) -> Path:
     source_root = Path(__file__).resolve().parents[1]
     project_root = tmp_path / "project"

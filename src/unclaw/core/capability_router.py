@@ -123,6 +123,14 @@ class LLMCapabilityRouter(CapabilityRouter):
                 follow_up_message=_AMBIGUOUS_FALLBACK_REPLY,
             )
 
+        # Pending clarification: if the assistant just asked a narrow question
+        # and the user gives a short direct answer, resolve it immediately.
+        clarification_decision = _is_pending_clarification_answer(
+            normalized_user_message, recent_history,
+        )
+        if clarification_decision is not None:
+            return clarification_decision
+
         # Follow-up resolution: short pronoun/reference messages that clearly
         # refer to a recent conversation topic should stay as direct_answer
         # instead of being classified as ambiguous by the LLM router.
@@ -131,6 +139,26 @@ class LLMCapabilityRouter(CapabilityRouter):
                 kind=CapabilityKind.DIRECT_ANSWER,
                 confidence="high",
                 source="follow_up_resolution",
+            )
+
+        # Subject continuation: "cherche sur Wikipédia" with active subject
+        if _is_subject_continuation(normalized_user_message, recent_history):
+            if capability_summary.web_search_available:
+                return CapabilityDecision(
+                    kind=CapabilityKind.WEB_RESEARCH,
+                    confidence="high",
+                    source="subject_continuation",
+                )
+
+        # Freshness pre-routing: obvious freshness signals bypass LLM router
+        if (
+            capability_summary.web_search_available
+            and _has_obvious_freshness_signal(normalized_user_message)
+        ):
+            return CapabilityDecision(
+                kind=CapabilityKind.WEB_RESEARCH,
+                confidence="high",
+                source="freshness_heuristic",
             )
 
         try:
@@ -425,6 +453,189 @@ _FOLLOW_UP_REFERENCE_PATTERN = re.compile(
 _SEARCH_TOOL_HISTORY_PREFIX = "Tool: search_web\n"
 
 _MAX_FOLLOW_UP_WORDS = 15
+
+# ---------------------------------------------------------------------------
+# Pending clarification resolution
+# ---------------------------------------------------------------------------
+
+_CLARIFICATION_QUESTION_PATTERN = re.compile(
+    r"\b(?:"
+    r"(?:souhaitez[- ]vous|voulez[- ]vous|préférez[- ]vous|dois[- ]je)"
+    r"|(?:would you (?:like|prefer)|should I|do you want)"
+    r"|(?:internet ou|web ou|en ligne ou|local ou|fichier ou)"
+    r"|(?:internet or|web or|online or|local or|file or)"
+    r")\b",
+    flags=re.IGNORECASE,
+)
+
+_CLARIFICATION_WEB_ANSWERS = frozenset({
+    "internet", "web", "en ligne", "online", "oui", "yes",
+    "recherche", "search", "cherche", "go ahead", "vas-y", "ok",
+})
+
+_CLARIFICATION_LOCAL_ANSWERS = frozenset({
+    "local", "fichier", "file", "disque", "disk", "dossier",
+    "folder", "non", "no", "pdf", "le pdf", "le fichier",
+})
+
+_CLARIFICATION_WIKIPEDIA_ANSWERS = frozenset({
+    "wikipedia", "wikipédia", "wiki",
+})
+
+
+def _is_pending_clarification_answer(
+    user_message: str,
+    recent_history: Sequence[ChatMessage],
+) -> CapabilityDecision | None:
+    """Detect when the user is answering a pending clarification question.
+
+    Returns a routing decision if the last assistant message was a clarification
+    question and the current user message is a short direct answer to it.
+    Returns None otherwise.
+    """
+    if not recent_history:
+        return None
+
+    words = user_message.split()
+    if len(words) > 5:
+        return None
+
+    normalized = user_message.strip().lower().rstrip(".,!?")
+
+    last_assistant_message = _find_last_assistant_message(recent_history)
+    if last_assistant_message is None:
+        return None
+
+    assistant_text = last_assistant_message.content.strip()
+    if not assistant_text.endswith("?"):
+        return None
+
+    is_clarification = (
+        _CLARIFICATION_QUESTION_PATTERN.search(assistant_text) is not None
+    )
+    if not is_clarification:
+        return None
+
+    if normalized in _CLARIFICATION_WEB_ANSWERS:
+        return CapabilityDecision(
+            kind=CapabilityKind.WEB_RESEARCH,
+            confidence="high",
+            source="pending_clarification",
+        )
+
+    if normalized in _CLARIFICATION_LOCAL_ANSWERS:
+        return CapabilityDecision(
+            kind=CapabilityKind.LOCAL_FILE_INTENT,
+            confidence="high",
+            source="pending_clarification",
+            follow_up_message=_LOCAL_FILE_FALLBACK_REPLY,
+        )
+
+    if normalized in _CLARIFICATION_WIKIPEDIA_ANSWERS:
+        return CapabilityDecision(
+            kind=CapabilityKind.WEB_RESEARCH,
+            confidence="high",
+            source="pending_clarification",
+        )
+
+    return None
+
+
+def _find_last_assistant_message(
+    history: Sequence[ChatMessage],
+) -> ChatMessage | None:
+    """Return the most recent assistant message, skipping trailing user messages.
+
+    The caller passes the full recent history which may include the current
+    user message at the end.  We skip those trailing USER messages to find
+    the assistant turn that immediately preceded this user turn.
+    """
+    skipping_trailing_user = True
+    for message in reversed(history):
+        if skipping_trailing_user and message.role is MessageRole.USER:
+            continue
+        skipping_trailing_user = False
+        if message.role is MessageRole.ASSISTANT:
+            return message
+        # Hit a TOOL or something else — stop
+        return None
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Subject continuation for "search on X" style follow-ups
+# ---------------------------------------------------------------------------
+
+_SUBJECT_CONTINUATION_PATTERN = re.compile(
+    r"\b(?:"
+    r"cherche(?:r)?\s+(?:sur|dans|via)\b"
+    r"|search(?:es)?\s+(?:on|in|via|for)\b"
+    r"|look\s+(?:on|up\s+on|it\s+up\s+on)\b"
+    r"|regarde(?:r)?\s+(?:sur|dans)\b"
+    r"|trouve(?:r)?\s+(?:sur|dans)\b"
+    r")\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _is_subject_continuation(
+    user_message: str,
+    recent_history: Sequence[ChatMessage],
+) -> bool:
+    """Detect short follow-up messages that continue the current subject.
+
+    Handles cases like "cherche sur Wikipédia" or "search on Wikipedia" where
+    the user doesn't use pronouns but clearly refers to the current subject.
+    """
+    if not recent_history:
+        return False
+
+    words = user_message.split()
+    if len(words) > _MAX_FOLLOW_UP_WORDS:
+        return False
+
+    if _SUBJECT_CONTINUATION_PATTERN.search(user_message) is None:
+        return False
+
+    return _has_recent_substantive_context(recent_history)
+
+
+# ---------------------------------------------------------------------------
+# Freshness pre-routing heuristic
+# ---------------------------------------------------------------------------
+
+_FRESHNESS_SIGNAL_PATTERN = re.compile(
+    r"\b(?:"
+    # French freshness signals
+    r"actualit[eé]s?\s+(?:du jour|d'aujourd|importantes?|r[eé]centes?)"
+    r"|(?:derni[eè]res?\s+(?:nouvelles?|infos?|actualit[eé]s?))"
+    r"|(?:r[eé]sum[eé]\s+(?:des?\s+)?actualit[eé]s?)"
+    r"|(?:quoi de neuf|qu'?est[- ]ce qui se passe)"
+    r"|(?:news?\s+du jour|news?\s+d'aujourd)"
+    # English freshness signals
+    r"|(?:today'?s?\s+(?:news|headlines|events|updates?))"
+    r"|(?:latest\s+(?:news|headlines|updates?|developments?))"
+    r"|(?:current\s+(?:news|events|price|status|score|weather))"
+    r"|(?:recent\s+(?:news|headlines|updates?|developments?|events?))"
+    r"|(?:what(?:'s| is)\s+(?:happening|going on)\s+(?:today|now|right now))"
+    r"|(?:breaking\s+news)"
+    r")\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _has_obvious_freshness_signal(user_message: str) -> bool:
+    """Detect messages that clearly need current/live web data.
+
+    This pre-LLM heuristic catches obvious freshness requests to ensure
+    reliable routing without depending on the local model's classification.
+    """
+    return _FRESHNESS_SIGNAL_PATTERN.search(user_message) is not None
+
+
+# ---------------------------------------------------------------------------
+# Follow-up reference resolution
+# ---------------------------------------------------------------------------
 
 
 def _is_obvious_follow_up(

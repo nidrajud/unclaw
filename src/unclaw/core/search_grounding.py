@@ -722,31 +722,45 @@ def _compose_grounded_answer(
     grounding: SearchGroundingContext,
 ) -> str:
     if _query_is_age_request(query):
-        age_answer = _compose_age_answer(grounding)
+        age_answer = _compose_age_answer(grounding, query=query)
         if age_answer:
             return age_answer
 
     supported_facts = _select_supported_facts(grounding)
     if not supported_facts and grounding.uncertain_findings:
-        return _compose_uncertain_only_answer(grounding)
+        return _compose_uncertain_only_answer(grounding, query=query)
     if not supported_facts:
+        is_french = _query_looks_french(query)
+        if is_french:
+            return "Je n'ai pas pu confirmer de détails fiables dans les sources consultées."
         return "I couldn't confirm any strong details from the retrieved sources."
 
     if _query_is_person_profile(query):
         return _compose_person_answer(
             supported_facts=supported_facts,
             grounding=grounding,
+            query=query,
         )
 
     sentences = [fact.text.rstrip(".") + "." for fact in supported_facts[:_MAX_COMPOSED_FACTS]]
     if grounding.uncertain_findings:
-        sentences.append(_compose_uncertainty_note(grounding))
+        sentences.append(_compose_uncertainty_note(grounding, query=query))
     return " ".join(sentences).strip()
 
 
-def _compose_age_answer(grounding: SearchGroundingContext) -> str | None:
+def _compose_age_answer(
+    grounding: SearchGroundingContext,
+    *,
+    query: str = "",
+) -> str | None:
+    is_french = _query_looks_french(query or grounding.query)
     if grounding.birth_date is None:
         if grounding.uncertain_findings:
+            if is_french:
+                return (
+                    "J'ai trouvé quelques détails biographiques, mais je n'ai pas pu "
+                    "confirmer une date de naissance de manière fiable pour calculer un âge."
+                )
             return (
                 "I found some biographical details, but I could not confirm a birth "
                 "date strongly enough to compute a current age."
@@ -754,6 +768,11 @@ def _compose_age_answer(grounding: SearchGroundingContext) -> str | None:
         return None
 
     age = _compute_age(grounding.birth_date, grounding.current_date)
+    if is_french:
+        return (
+            f"J'ai trouvé une date de naissance du {grounding.birth_date.isoformat()}. "
+            f"Au {grounding.current_date.isoformat()}, cela lui donne {age} ans."
+        )
     return (
         f"I found a birth date of {grounding.birth_date.isoformat()}. "
         f"On {grounding.current_date.isoformat()}, that makes them {age} years old."
@@ -764,19 +783,38 @@ def _compose_person_answer(
     *,
     supported_facts: Sequence[SearchGroundingFinding],
     grounding: SearchGroundingContext,
+    query: str = "",
 ) -> str:
     selected_facts = list(supported_facts[:_MAX_COMPOSED_FACTS])
     sentences = [fact.text.rstrip(".") + "." for fact in selected_facts]
     if grounding.uncertain_findings:
-        sentences.append(_compose_uncertainty_note(grounding))
+        sentences.append(_compose_uncertainty_note(grounding, query=query))
     return " ".join(sentences).strip()
 
 
-def _compose_uncertain_only_answer(grounding: SearchGroundingContext) -> str:
-    if any(
+def _compose_uncertain_only_answer(
+    grounding: SearchGroundingContext,
+    *,
+    query: str = "",
+) -> str:
+    is_french = _query_looks_french(query or grounding.query)
+    has_handles = any(
         _HANDLE_HINT_PATTERN.search(finding.text) or _HANDLE_TERM_PATTERN.search(finding.text)
         for finding in grounding.uncertain_findings
-    ):
+    )
+
+    if is_french:
+        if has_handles:
+            return (
+                "J'ai trouvé quelques détails biographiques, mais les identifiants "
+                "de réseaux sociaux n'étaient pas confirmés de manière fiable."
+            )
+        return (
+            "J'ai trouvé quelques mentions, mais les détails n'étaient pas confirmés "
+            "de manière cohérente dans les sources consultées."
+        )
+
+    if has_handles:
         return (
             "I found some biographical details, but I did not see consistent support "
             "for specific social handles or usernames."
@@ -787,16 +825,53 @@ def _compose_uncertain_only_answer(grounding: SearchGroundingContext) -> str:
     )
 
 
-def _compose_uncertainty_note(grounding: SearchGroundingContext) -> str:
-    if any(
+def _compose_uncertainty_note(
+    grounding: SearchGroundingContext,
+    *,
+    query: str = "",
+) -> str:
+    is_french = _query_looks_french(query or grounding.query)
+    has_handles = any(
         _HANDLE_HINT_PATTERN.search(finding.text) or _HANDLE_TERM_PATTERN.search(finding.text)
         for finding in grounding.uncertain_findings
-    ):
+    )
+
+    if is_french:
+        if has_handles:
+            return (
+                "Certains détails, notamment les identifiants de réseaux sociaux, "
+                "n'ont pas été confirmés de manière fiable dans les sources consultées."
+            )
+        return (
+            "Certains détails moins fiables ont été omis car les sources consultées "
+            "ne les confirmaient pas de manière cohérente."
+        )
+
+    if has_handles:
         return (
             "Some profile details, including possible social handles, were not "
             "consistently confirmed."
         )
     return "Some lower-confidence details were omitted because the sources did not confirm them consistently."
+
+
+_FRENCH_SIGNAL_PATTERN = re.compile(
+    r"\b(?:qui est|qu[' ]est[- ]ce|fais|parle|cherche|résumé|décris|donne|"
+    r"quel(?:le)?s?|quoi|pourquoi|comment|combien|biographie|recherche|"
+    r"actualit[eé]s?|moi|sur|dans|elle|lui|son|sa|ses|des|les|une?|"
+    r"est[- ]ce|d[' ]|l[' ])\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _query_looks_french(query: str) -> bool:
+    """Lightweight heuristic to detect French-language queries."""
+    if not query:
+        return False
+    matches = _FRENCH_SIGNAL_PATTERN.findall(query)
+    words = query.split()
+    # If at least 25% of tokens match French signals, treat as French
+    return len(matches) >= max(1, len(words) // 4)
 
 
 def _select_supported_facts(
