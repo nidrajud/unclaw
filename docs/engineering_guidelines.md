@@ -2,151 +2,332 @@
 
 ## Purpose
 
-This document defines the engineering rules for the unclaw codebase.
+This document defines the engineering rules for the Unclaw codebase.
+
+These rules exist to protect the project from drifting away from its actual goal:
+**building a lightweight, secure, privacy-first, local-only autonomous AI agent runtime**.
+
+This means the codebase must not drift toward:
+- a cloud wrapper,
+- a framework-heavy experiment,
+- a brittle rules engine,
+- or a chatbot with manual tools that only looks agentic on paper.
+
+---
+
+## Core engineering priorities
 
 The project must remain:
-- clean
-- understandable
-- modular
-- practical
-- human-looking
+- lightweight,
+- understandable,
+- modular,
+- secure,
+- privacy-first,
+- local-first,
+- scalable in the right way,
+- and usable by real people on consumer hardware.
 
-The code should look like it was written by a careful engineer, not generated carelessly.
+When trade-offs appear, prefer:
+1. correctness,
+2. safety,
+3. architectural honesty,
+4. maintainability,
+5. speed and simplicity,
+6. feature breadth later.
 
-## General coding rules
+---
 
-### Keep it simple
-Prefer simple and explicit code over clever abstractions.
+## Non-negotiable project constraints
 
-### Write readable code
-Names should be clear. Functions should be focused. Modules should have a clear purpose.
+### Local-only core intelligence
+Do not introduce required cloud inference into the core runtime.
+Unclaw must work with local models as its real default, not as a secondary mode.
 
-### Avoid premature complexity
-Do not add advanced abstractions before they are needed by the project.
+### Lightweight by default
+Keep dependencies limited and justified.
+Do not add heavyweight frameworks casually.
+Do not solve architectural weaknesses with giant orchestration libraries unless absolutely necessary.
 
-### No hidden magic
-Important behavior should be easy to follow through the codebase.
+### Privacy-first
+Assume user data is sensitive.
+Minimize what is stored, minimize what is logged, and keep storage explicit.
 
-## Project constraints
+### Secure-first
+Every new tool or runtime path must be reviewed through a security lens:
+- what input is trusted,
+- what is untrusted,
+- what may be dangerous,
+- what must be bounded,
+- what must be logged,
+- what must be blocked by default.
 
-### Local-first only
-Do not introduce cloud dependencies into the core runtime.
+### Agent runtime target
+Always code with the target in mind:
+Unclaw is supposed to become a **true autonomous agent runtime**.
+Do not normalize manual-tool-only behavior as the final architecture.
 
-### Consumer hardware aware
-Code should be designed with modest local hardware in mind:
-- avoid unnecessary overhead
-- avoid prompt bloat
-- avoid loading too many features at once
+---
 
-### Transparency matters
-The runtime should expose decisions, tool usage, and important execution steps in logs.
+## Architecture rules
 
-## File and module structure
+### Keep channels thin
+CLI, Telegram, and future channels must stay thin.
+They handle transport and UX, not intelligence.
 
-### One clear responsibility per module
-A module should have one clear purpose.
+### Core owns orchestration
+Routing, context assembly, tool orchestration, observation-action loops, and answer shaping belong in `core/`.
 
-### Thin entrypoints
-CLI, Telegram, and future channel adapters should remain thin.
+### Keep provider logic isolated
+Provider-specific logic must stay in `llm/`.
+Do not leak backend quirks into the rest of the runtime unless wrapped behind a clear abstraction.
 
-### Core logic belongs in the runtime
-Routing, orchestration, context building, and execution logic belong in the core modules.
+### Keep tools focused
+Tools should do one thing well.
+They should return reliable data, not simulate assistant-style final prose.
 
-## Comments and style
+### Keep storage explicit
+Persistence must go through clear storage/repository code.
+No hidden state.
+No magical side channels.
 
-### Comments should be simple
-Use short and useful comments when they help explain intent or a non-obvious step.
+### Keep observability central
+Important runtime decisions must be traced through the logging/tracing system, not scattered prints.
 
-### No noisy comments
-Do not explain trivial code line by line.
+---
 
-### No emojis in code or comments
-Emojis are allowed only in user-facing interfaces where they improve UX.
+## Scalability rules
 
-### Human tone
-Code and comments should feel written by a human engineer.
+### Avoid brittle deterministic lists when a more adaptive mechanism is reasonable
+Do not build large, hand-maintained lists of phrases as the main source of intelligence when the problem is really one of routing, intent classification, or model/tool coordination.
 
-## Prompting and AI-generated code
+Examples of what to avoid:
+- giant keyword trigger lists for web search,
+- language-specific hardcoded phrase lists as the main routing method,
+- long rule tables that become impossible to maintain.
 
-### AI is a coding assistant, not the architect
-Generated code must follow the project structure and constraints already defined in the docs.
+This does **not** mean “no deterministic logic ever”.
+It means deterministic logic should be:
+- minimal,
+- justified,
+- bounded,
+- and not the only intelligence layer for a capability that must scale across languages and future tools.
 
-### Do not let the assistant redesign the project casually
-When generating a file, the assistant should respect the existing architecture unless explicitly asked to change it.
+### Build extension points early when they are obviously needed
+If a capability is certain to grow, create a clean seam early.
+Examples:
+- provider abstractions,
+- tool contracts,
+- routing/capability interfaces,
+- search profiles,
+- cache namespaces,
+- permission levels.
 
-### Prefer minimal complete implementations
-For early phases, prefer small but correct implementations over ambitious incomplete ones.
+### Do not future-proof by overengineering
+Create clean seams, not giant abstractions.
+“Future-proof” does not mean building a framework before the need is real.
 
-## Testing and validation
+---
 
-### Test what matters first
-Prioritize:
-- routing behavior
-- command handling
-- tool execution
-- session persistence
-- memory selection
+## Coding rules
 
-### Keep smoke tests easy to run
-Basic checks should be simple to execute on both Linux and macOS.
+### Prefer explicit code
+Use readable, explicit Python.
+Avoid cleverness that hides control flow.
 
-## Dependencies
+### Small focused modules
+Each module should have a clear responsibility.
+If a file becomes a multi-subsystem monolith, split it.
+
+### Functions should do one job
+Prefer short focused functions with clear inputs/outputs.
+If a function does routing, planning, formatting, and validation at once, it is probably doing too much.
+
+### Make trust boundaries obvious
+Whenever code crosses a trust boundary, the code should make that visible.
+Examples:
+- user input,
+- fetched web content,
+- filesystem access,
+- secrets,
+- tool outputs,
+- persistence.
+
+### Keep type expectations clear
+Use clear function signatures and data contracts.
+Avoid `Any` when a stronger contract is practical.
+
+### Kill dead config and dead code
+Do not keep architectural promises in config or docs that have no implementation behind them unless they are clearly labeled as planned.
+
+---
+
+## AI-generated code rules
+
+### AI is an implementation assistant, not the architect
+Any AI-generated code must obey project constraints.
+If the generated code conflicts with the architecture, the architecture wins.
+
+### Do not let the assistant drift the project
+Reject changes that:
+- add unnecessary complexity,
+- silently introduce cloud assumptions,
+- lock the code to one provider,
+- replace runtime design with prompt tricks,
+- or degrade the project into a manual-tool chatbot.
+
+### Ask for bounded implementations
+Prefer prompts that request:
+- exact scope,
+- file targets,
+- tests,
+- constraints,
+- explicit non-goals,
+- and architectural compatibility.
+
+### Always audit generated changes against the target product
+Before accepting a generated change, ask:
+- does this make Unclaw more autonomous or more brittle?
+- does this improve security/privacy/local-first behavior?
+- does this improve maintainability?
+- does this hide a structural problem instead of solving it?
+
+---
+
+## Tooling and dependency rules
 
 ### Keep dependencies limited
-Every dependency should have a clear reason to exist.
+Every dependency must have a clear reason.
+No dependency should be added just because it is fashionable.
 
-### Prefer stable and well-known libraries
-Avoid niche dependencies unless they clearly solve a real problem.
+### Prefer standard library when reasonable
+If the standard library can solve the problem cleanly, prefer it.
 
-### Avoid heavyweight dependencies too early
-Do not add large frameworks before they are justified.
+### Prefer proven lightweight libraries
+If a dependency is justified, prefer stable and widely used libraries.
 
-## Logging
+### Avoid heavyweight agent frameworks too early
+Unclaw should not depend on a giant framework unless the project has already proven that the architecture truly needs it.
+The default bias should be: build the loop, not the framework.
 
-### Logging is a product feature
-Logs are not only for developers. They help users understand the agent.
+---
 
-### Capture meaningful events
+## Security rules
+
+### Safe defaults first
+New capabilities must default to the safest reasonable behavior.
+
+### Validate arguments aggressively
+Every tool input must be validated.
+Paths, URLs, modes, sizes, identifiers, and bounds must be checked.
+
+### Treat fetched content as untrusted
+Web content and file content are data, not trusted instructions.
+The runtime must protect itself against prompt injection and unsafe context contamination.
+
+### Bound loops and resources
+Any agent loop, tool retry logic, search expansion, or recursion must be bounded.
+
+### Make risky actions explicit
+High-risk actions must not happen silently.
+Permission boundaries must be visible in code and in runtime behavior.
+
+---
+
+## Privacy rules
+
+### Store as little as practical
+Persist only what is needed for functionality, continuity, or debugging.
+
+### Keep sensitive values out of logs
+Reasoning, secrets, tokens, and private content should be redacted or minimized by default.
+
+### Make storage inspectable
+The user or developer should be able to understand where data is stored and why.
+
+### Keep retention intentional
+If a capability stores search results, session data, or cache data, its retention policy should be explicit.
+
+---
+
+## Testing rules
+
+### Test what matters architecturally
+Prioritize tests for:
+- routing,
+- tool invocation,
+- observation-action loop behavior,
+- session/state persistence,
+- safety checks,
+- grounding,
+- and failure modes.
+
+### Test real behavior, not only mocked happy paths
+Mocking is useful, but avoid false confidence.
+If a capability depends on real provider behavior or real parsing behavior, add realistic tests where practical.
+
+### Keep tests understandable
+Tests should help another engineer understand how the system is supposed to behave.
+
+### Add regression tests for architectural failures
+When a bug reveals that the system drifted away from the target agent behavior, encode that as a regression test.
+
+---
+
+## Logging and observability rules
+
+### Logging is part of the product
+Logs are not only for developers.
+They are part of how Unclaw stays transparent and trustworthy.
+
+### Trace major decisions
 Log:
-- routing decisions
-- selected model
-- selected memory
-- tool invocations
-- timing
-- errors
+- route decisions,
+- selected model/profile,
+- tool decisions,
+- search depth or research mode,
+- timings,
+- failures,
+- important safety blocks,
+- and answer completion.
 
-### Avoid noisy logs with no value
-Logs should be useful, not overwhelming.
+### Avoid noisy logs without meaning
+Do not log everything blindly.
+Log what helps explain runtime decisions and failures.
 
-## Documentation
+---
 
-### Docs should be practical
-Documentation should help both humans and coding assistants work effectively.
+## Documentation rules
 
 ### Keep docs aligned with reality
-When architecture changes, update the relevant docs.
+If something is target-state but not implemented, say so clearly.
+Do not document future architecture as if it already exists.
 
-## Git and commits
+### Keep the project goal explicit everywhere that matters
+The docs must repeatedly reinforce that Unclaw is trying to become:
+- local-first,
+- privacy-first,
+- secure-first,
+- lightweight,
+- autonomous,
+- scalable without heavy frameworks,
+- and mainstream-friendly.
 
-### Small clean commits
-Prefer many small commits with clear intent.
+### Use docs to prevent drift
+Docs are not decoration.
+They are part of project control.
+They must keep human contributors and AI coding assistants aligned.
 
-### Good commit messages
-Write short professional commit messages in English.
+---
 
-Examples:
-- Add initial tool registry
-- Implement CLI session manager
-- Add basic router decision schema
+## Practical rule for contributors
 
-## Future-proofing
+Before merging or accepting any non-trivial change, ask:
 
-### Build extension points carefully
-Add clear interfaces for:
-- model providers
-- tools
-- channels
-- memory backends
+1. does this move Unclaw toward a real autonomous local agent runtime?
+2. does it preserve lightweight local-first architecture?
+3. does it improve or weaken security/privacy?
+4. does it create brittle deterministic behavior?
+5. does it keep the codebase clean and extensible?
+6. does it remain understandable to another engineer?
 
-### Do not overbuild too early
-Future-proofing should not turn into overengineering.
+If the answer is unclear, the change is not ready.

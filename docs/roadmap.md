@@ -1,172 +1,284 @@
 # Roadmap
 
-## Project strategy
+## Strategy
 
-The project is built in layers.
+Unclaw must be developed in layers.
 
-The first goal is not to ship everything. The first goal is to ship a strong local-first core that is:
-- useful
-- fast
-- clean
-- observable
-- extensible
+But the sequencing matters:
+we should not keep adding surface features to a runtime that is still structurally closer to a chatbot with manual tools than to a real agent.
 
-Once the core is solid, more capabilities can be added safely.
+The first major objective now is:
+**repair the MVP foundation so Unclaw becomes a serious local-first autonomous agent runtime baseline.**
 
-## Phase 0 - Project foundation
+This roadmap therefore distinguishes clearly between:
+- what exists,
+- what is being repaired,
+- and what comes after the runtime becomes truly agentic.
 
-Goal:
-- create a clean repository
-- define project direction
-- define architecture
-- define coding guidelines
+---
 
-Deliverables:
-- README
-- core docs
-- repository structure
-- local Python environment
-- first commits
+## Guiding priorities
 
-## Phase 1 - MVP core runtime
+Every roadmap decision should preserve these constraints:
+- lightweight,
+- secure-first,
+- privacy-first,
+- local-first,
+- multi-model aware,
+- mainstream-usable,
+- and scalable without heavy frameworks or brittle deterministic logic.
 
-Goal:
-- build a minimal but real agent runtime
+---
 
-Scope:
-- CLI chat
-- session management
-- model provider abstraction
-- model profiles
-- command handler
-- routing
-- live logging
-- simple local persistence
+## Phase 0 — Foundation and documentation
 
-Deliverables:
-- terminal interaction
-- slash commands
-- fast and deep modes
-- structured runtime flow
+### Goal
+Create a clean repository and define the project direction.
 
-## Phase 2 - Tools and file/web capabilities
+### Status
+Largely complete.
 
-Goal:
-- make the agent useful beyond chat
+### Deliverables
+- README,
+- core docs,
+- repository structure,
+- local Python environment,
+- first commits.
 
-Scope:
-- web search
-- URL fetch
-- file reading
-- file listing
-- tool registry
-- tool dispatcher
-- structured tool execution
+### Remaining expectation
+Docs must stay aligned with reality and with the target agent-runtime direction.
 
-Deliverables:
-- real agent tasks
-- visible tool traces
-- better routing outcomes
+---
 
-## Phase 3 - Basic memory
+## Phase 1 — Base runtime MVP
 
-Goal:
-- allow the agent to keep useful state without bloating prompts
+### Goal
+Build the first local-first conversational runtime.
 
-Scope:
-- session summaries
-- user memory basics
-- project memory basics
-- memory selection
-- memory writing rules
+### Status
+Complete as a conversational MVP, but incomplete as an agent runtime.
 
-Deliverables:
-- memory-aware conversations
-- better continuity
-- no blind memory injection
+### What exists
+- CLI chat,
+- session management,
+- model profiles,
+- local persistence,
+- basic routing,
+- live logging,
+- provider abstraction.
 
-## Phase 4 - Telegram channel
+### Architectural limitation
+This phase produced a strong assistant foundation, but not yet a true autonomous runtime.
 
-Goal:
-- interact with the agent outside the terminal
+---
 
-Scope:
-- Telegram bot integration
-- same sessions and commands as CLI
-- shared runtime
-- shared logging model
+## Phase 2 — Initial tools and utility
 
-Deliverables:
-- local-first agent accessible from Telegram
+### Goal
+Make the system useful beyond plain chat.
 
-## Phase 5 - Stabilization and polish
+### Status
+Partially complete.
 
-Goal:
-- make the MVP solid and demonstrable
+### What exists
+- web search,
+- URL fetch,
+- file reading,
+- file listing,
+- tool registry,
+- tool dispatcher,
+- traceable manual tool execution.
 
-Scope:
-- cleanup
-- tests
-- better docs
-- better error handling
-- installation instructions for Linux and macOS
+### Architectural limitation
+These tools are still too manual from the user perspective.
+Tool existence alone does not make the system agentic.
 
-Deliverables:
-- strong demo-ready MVP
+---
 
-## Phase 6 - Advanced memory and planning
+## Phase 3 — Runtime repair: chatbot MVP to agent MVP
 
-Goal:
-- make the agent more capable on longer workflows
+### Goal
+This is now the most urgent phase.
+Transform Unclaw from a chatbot with manual tools into a serious local-first agent MVP.
 
-Scope:
-- better retrieval
-- memory scoring
-- memory namespaces
-- task planning improvements
-- replay and auditability
+### Priority
+Highest.
+Nothing is more important than this phase now.
 
-## Phase 7 - More tools and automation
+### Main objectives
+- connect models and tools properly,
+- introduce a bounded observation-action loop,
+- make tool use increasingly autonomous,
+- keep the UX natural,
+- keep the runtime lightweight,
+- keep the system safe and transparent.
 
-Goal:
-- move closer to a full local assistant
+### Expected outcomes
+- the model can request tool usage,
+- the runtime can execute tools and continue the turn,
+- search becomes a capability inside the runtime loop, not a separate fake-agent path,
+- routing becomes more adaptive,
+- final answers look like assistant answers, not tool dumps.
 
-Scope:
-- browser automation
-- system actions
-- note creation
-- mail drafts
-- richer permissions
-- skill packages
+### Example sub-phases
 
-## Phase 8 - Multi-machine local orchestration
+#### 3.1 Tool-calling and runtime loop
+- add model/tool integration,
+- parse native or structured tool calls,
+- implement bounded multi-step execution,
+- persist and trace loop steps clearly.
 
-Goal:
-- use stronger machines when available
+#### 3.2 Search stack repair
+- split the current search monolith,
+- make search discovery/fetch/synthesis cleaner,
+- harden against prompt injection,
+- improve answer shaping.
 
-Scope:
-- wake-on-LAN
-- task dispatch to a gaming PC
-- result retrieval
-- remote local worker pattern
+#### 3.3 Adaptive capability routing
+- reduce reliance on slash commands for normal behavior,
+- support capability-aware routing,
+- avoid giant deterministic trigger lists,
+- keep routing lightweight and bounded.
 
-## Phase 9 - Voice and richer UX
+#### 3.4 UX cleanup
+- hide internal mechanics better,
+- keep explicit commands for power users,
+- make the default experience feel like a real assistant.
 
-Goal:
-- make the agent more natural to use
+---
 
-Scope:
-- local STT
-- local TTS
-- voice session handling
-- richer UI
-- execution timeline visualization
+## Phase 4 — Stronger memory foundations
+
+### Goal
+Introduce memory that helps the runtime think better without bloating prompts.
+
+### Status
+Basic session memory exists, but richer memory remains future work.
+
+### Scope
+- better session summaries,
+- user memory basics,
+- project memory basics,
+- selective retrieval,
+- memory write rules,
+- bounded memory injection.
+
+### Important note
+Memory must not become a dump.
+It must stay selective, inspectable, and lightweight.
+
+---
+
+## Phase 5 — Stabilization and quality hardening
+
+### Goal
+Make the post-repair MVP solid, demonstrable, and trustworthy.
+
+### Scope
+- cleanup,
+- tests,
+- better docs,
+- stronger safety checks,
+- better error handling,
+- installation polish,
+- E2E validation,
+- performance checks.
+
+### Deliverable
+A strong demo-ready MVP that is honestly agentic, not only marketed that way.
+
+---
+
+## Phase 6 — Research depth and caching
+
+### Goal
+Strengthen web and information workflows without bloating the runtime.
+
+### Scope
+- local caching of research results,
+- better research/session state,
+- quick vs deep research profiles,
+- deeper multi-step research,
+- stronger synthesis quality,
+- still-bounded retrieval behavior.
+
+### Constraint
+This phase must keep the search/research stack lightweight and maintainable.
+
+---
+
+## Phase 7 — More tools and safe automation
+
+### Goal
+Move closer to a real local assistant while preserving safety.
+
+### Scope
+- browser automation,
+- note creation,
+- draft generation,
+- local system actions,
+- code/project tools,
+- richer permission boundaries,
+- possible skill packages.
+
+### Constraint
+Every new tool must fit the runtime cleanly.
+Do not widen the tool surface faster than the orchestration quality can support.
+
+---
+
+## Phase 8 — Multi-machine local orchestration
+
+### Goal
+Use stronger local machines when available.
+
+### Scope
+- wake-on-LAN,
+- heavy-task dispatch,
+- local worker pattern,
+- result retrieval,
+- secure machine-to-machine local coordination.
+
+### Constraint
+Keep the default setup simple for single-machine users.
+
+---
+
+## Phase 9 — Voice and richer UX
+
+### Goal
+Make the assistant more natural for mainstream usage.
+
+### Scope
+- local STT,
+- local TTS,
+- voice sessions,
+- richer UI,
+- execution timeline visualization.
+
+### Constraint
+Voice and richer UI must be built on top of a solid runtime, not used to hide architectural weakness.
+
+---
 
 ## Long-term direction
 
-Long-term, unclaw should become:
-- a strong local-first personal agent runtime
-- easy to install
-- easy to inspect
-- easy to extend
-- powerful on both modest and strong local hardware
+Long-term, Unclaw should become:
+- a strong local-first autonomous personal agent runtime,
+- easy to install,
+- easy to inspect,
+- easy to extend,
+- powerful on both modest and strong local hardware,
+- and trusted because its behavior stays visible and understandable.
+
+---
+
+## Immediate roadmap truth
+
+At this stage, the most important truth is simple:
+
+**do not keep piling features on top of a not-yet-agentic core.**
+
+The next serious milestone is not “more features”.
+It is:
+**turn the current MVP into a real autonomous local-first agent MVP.**
