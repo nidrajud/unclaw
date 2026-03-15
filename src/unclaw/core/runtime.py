@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from time import perf_counter
 from typing import TYPE_CHECKING
@@ -13,6 +14,7 @@ from unclaw.core.command_handler import CommandHandler
 from unclaw.core.executor import ToolExecutor, create_default_tool_registry
 from unclaw.core.research_flow import run_search_then_answer
 from unclaw.core.router import RouteKind, route_request
+from unclaw.core.runtime_modes import RuntimeMode
 from unclaw.core.session_manager import SessionManager
 from unclaw.logs.event_bus import EventBus
 from unclaw.logs.tracer import Tracer
@@ -80,20 +82,30 @@ def run_user_turn(
         runtime_mode=runtime_mode_decision.mode.value,
     )
 
+    recent_history = session_manager.list_messages(session.id)
     route = route_request(
         settings=session_manager.settings,
         model_profile_name=selected_model_profile_name,
         user_message=user_input,
         capability_summary=capability_summary,
         capability_router=capability_router,
+        recent_history=recent_history,
     )
     active_tracer.trace_route_selected(
         session_id=session.id,
         route_kind=route.kind.value,
         model_profile_name=route.model_profile_name,
+        router_model_profile_name=route.router_model_profile_name,
         runtime_mode=route.runtime_mode.value,
         route_source=route.route_source,
         route_confidence=route.route_confidence,
+    )
+
+    # In agent mode, sanitize replies to strip internal planning narration.
+    is_agent_mode = runtime_mode_decision.mode is RuntimeMode.AGENT
+    sanitized_transform = _compose_reply_transforms(
+        _agent_reply_sanitizer if is_agent_mode else None,
+        assistant_reply_transform,
     )
 
     if route.kind is RouteKind.DIRECT_ANSWER:
@@ -108,7 +120,7 @@ def run_user_turn(
             capability_summary=capability_summary,
             assistant_reply_transform=_compose_reply_transforms(
                 _warning_prefix_transform(warning_message),
-                assistant_reply_transform,
+                sanitized_transform,
             ),
         )
 
@@ -120,7 +132,7 @@ def run_user_turn(
             tool_executor=active_tool_executor,
             tool_call=_build_web_research_tool_call(user_input),
             persist_user_message=False,
-            assistant_reply_transform=assistant_reply_transform,
+            assistant_reply_transform=sanitized_transform,
         ).assistant_reply
 
     assistant_reply = _build_non_autonomous_reply(
@@ -204,3 +216,52 @@ def _compose_reply_transforms(
 
 def _elapsed_ms(started_at: float) -> int:
     return max(0, round((perf_counter() - started_at) * 1000))
+
+
+# ---------------------------------------------------------------------------
+# Agent-mode reply sanitization (Fix #2: never expose internal mechanics)
+# ---------------------------------------------------------------------------
+
+_PLANNING_NARRATION_PATTERNS = (
+    re.compile(
+        r"^(?:Je vais|I will|I'll|Let me|I'm going to|I need to|I should)"
+        r"\s+(?:vérifier|chercher|rechercher|check|search|look up|verify|find"
+        r"|use|run|execute|fetch|query)",
+        flags=re.IGNORECASE | re.MULTILINE,
+    ),
+    # Lines that look like raw slash commands
+    re.compile(r"^/(?:search|fetch|read|ls)\s+", flags=re.MULTILINE),
+    # Lines with raw JSON tool output
+    re.compile(r'^\s*\{["\'](?:capability|tool_name|query)["\']:', flags=re.MULTILINE),
+)
+
+
+def _agent_reply_sanitizer(reply_text: str) -> str:
+    """Strip internal planning narration and tool commands from agent replies."""
+    stripped = reply_text.strip()
+
+    # Silent fallback: if the entire reply is a raw JSON object (structured
+    # output leak), replace it with a neutral message instead of exposing it.
+    if stripped.startswith("{") and stripped.endswith("}"):
+        try:
+            import json
+            parsed = json.loads(stripped)
+            if isinstance(parsed, dict) and any(
+                key in parsed for key in ("capability", "tool_name", "action", "plan")
+            ):
+                return (
+                    "I was not able to produce a clear answer this time. "
+                    "Please try rephrasing your question."
+                )
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    cleaned = stripped
+    for pattern in _PLANNING_NARRATION_PATTERNS:
+        lines = cleaned.split("\n")
+        filtered = [line for line in lines if not pattern.match(line.strip())]
+        cleaned = "\n".join(filtered)
+
+    # Collapse excess blank lines
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned if cleaned else reply_text

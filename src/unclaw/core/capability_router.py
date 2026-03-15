@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from unclaw.core.capabilities import RuntimeCapabilitySummary
 from unclaw.llm.base import LLMMessage, LLMRole, ResolvedModelProfile
 from unclaw.llm.ollama_provider import OllamaProvider
+from unclaw.schemas.chat import ChatMessage, MessageRole
 from unclaw.settings import Settings
 
 _LOCAL_FILE_FALLBACK_REPLY = (
@@ -92,6 +94,7 @@ class CapabilityRouter(ABC):
         profile: ResolvedModelProfile,
         user_message: str,
         capability_summary: RuntimeCapabilitySummary,
+        recent_history: Sequence[ChatMessage] = (),
     ) -> CapabilityDecision:
         """Classify one turn into a bounded capability path."""
 
@@ -109,6 +112,7 @@ class LLMCapabilityRouter(CapabilityRouter):
         profile: ResolvedModelProfile,
         user_message: str,
         capability_summary: RuntimeCapabilitySummary,
+        recent_history: Sequence[ChatMessage] = (),
     ) -> CapabilityDecision:
         normalized_user_message = user_message.strip()
         if not normalized_user_message:
@@ -117,6 +121,16 @@ class LLMCapabilityRouter(CapabilityRouter):
                 confidence="high",
                 source="empty_input_fallback",
                 follow_up_message=_AMBIGUOUS_FALLBACK_REPLY,
+            )
+
+        # Follow-up resolution: short pronoun/reference messages that clearly
+        # refer to a recent conversation topic should stay as direct_answer
+        # instead of being classified as ambiguous by the LLM router.
+        if _is_obvious_follow_up(normalized_user_message, recent_history):
+            return CapabilityDecision(
+                kind=CapabilityKind.DIRECT_ANSWER,
+                confidence="high",
+                source="follow_up_resolution",
             )
 
         try:
@@ -205,6 +219,12 @@ def _build_router_messages(
             "- automation_intent: the user wants system actions, file edits, "
             "command execution, or other automation."
         ),
+        "Freshness signals — prefer web_research when the question:",
+        "- asks about current events, recent news, or today's information,",
+        "- asks who currently holds a role, title, or position,",
+        "- asks about prices, scores, weather, or live data,",
+        "- asks about upcoming or future events, releases, or announcements,",
+        "- uses words like 'current', 'latest', 'today', 'now', 'upcoming', 'next', 'recent'.",
         "Safety rules:",
         (
             "- If the turn refers to local files, paths, directories, repository "
@@ -374,3 +394,77 @@ def _looks_like_local_filename(token: str) -> bool:
         return False
 
     return extension.lower() in _LOCAL_FILE_EXTENSIONS
+
+
+# ---------------------------------------------------------------------------
+# Follow-up reference resolution
+# ---------------------------------------------------------------------------
+
+_FOLLOW_UP_PRONOUN_PATTERN = re.compile(
+    r"\b(?:"
+    r"(?:he|she|him|her|his|hers|they|them|their|theirs|it|its)"
+    r"|(?:il|elle|lui|eux|elles|son|sa|ses|leur|leurs)"
+    r"|(?:er|sie|ihm|ihr|ihnen|sein|seine|seinen|seiner)"
+    r")\b",
+    flags=re.IGNORECASE,
+)
+
+_FOLLOW_UP_REFERENCE_PATTERN = re.compile(
+    r"\b(?:"
+    r"(?:that|this|those|these)"
+    r"|(?:the same|the one|same person|same thing)"
+    r"|(?:more detail|more about|tell me more|describe|explain)"
+    r"|(?:and (?:what|how|where|when|why|who))"
+    r"|(?:et (?:son|sa|ses|quel|quelle|où|quand|comment|pourquoi))"
+    r"|(?:fais|donne|parle|decris|décris)"
+    r"|(?:carrière|career|age|âge|born|née?|biography)"
+    r")\b",
+    flags=re.IGNORECASE,
+)
+
+_SEARCH_TOOL_HISTORY_PREFIX = "Tool: search_web\n"
+
+_MAX_FOLLOW_UP_WORDS = 15
+
+
+def _is_obvious_follow_up(
+    user_message: str,
+    recent_history: Sequence[ChatMessage],
+) -> bool:
+    """Detect short follow-up messages that clearly refer to recent context.
+
+    Returns True only when:
+    1. The message is short (≤ 15 words)
+    2. The message contains pronouns or follow-up reference language
+    3. The recent history has substantial context (assistant reply or search results)
+    """
+    if not recent_history:
+        return False
+
+    words = user_message.split()
+    if len(words) > _MAX_FOLLOW_UP_WORDS:
+        return False
+
+    has_pronoun = _FOLLOW_UP_PRONOUN_PATTERN.search(user_message) is not None
+    has_reference = _FOLLOW_UP_REFERENCE_PATTERN.search(user_message) is not None
+    if not has_pronoun and not has_reference:
+        return False
+
+    return _has_recent_substantive_context(recent_history)
+
+
+def _has_recent_substantive_context(
+    history: Sequence[ChatMessage],
+) -> bool:
+    """Check whether the last few turns contain assistant replies or search results."""
+    # Look at the last 6 messages for substantive context
+    recent = history[-6:] if len(history) > 6 else history
+    for message in reversed(recent):
+        if message.role is MessageRole.ASSISTANT and len(message.content.strip()) > 30:
+            return True
+        if (
+            message.role is MessageRole.TOOL
+            and message.content.startswith(_SEARCH_TOOL_HISTORY_PREFIX)
+        ):
+            return True
+    return False

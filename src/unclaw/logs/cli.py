@@ -289,6 +289,15 @@ def render_simple_log_line(raw_line: str) -> str | None:
             if isinstance(runtime_mode, str) and runtime_mode:
                 details.append(f"mode={runtime_mode}")
             details.append(f"profile={payload.get('model_profile_name', '?')}")
+            router_profile = payload.get("router_model_profile_name")
+            if isinstance(router_profile, str) and router_profile:
+                details.append(f"router_profile={router_profile}")
+            route_confidence = payload.get("route_confidence")
+            if isinstance(route_confidence, str) and route_confidence:
+                details.append(f"confidence={route_confidence}")
+            route_source = payload.get("route_source")
+            if isinstance(route_source, str) and route_source:
+                details.append(f"source={route_source}")
             return f"[{timestamp}] route selected | {' | '.join(details)}"
         case "model.succeeded":
             details = [

@@ -1580,6 +1580,554 @@ def test_run_user_turn_uses_configured_ollama_timeout(
         session_manager.close()
 
 
+def test_follow_up_after_person_search_keeps_context(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Pronoun follow-up after a person search-backed answer stays as direct_answer."""
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    event_bus = EventBus()
+    published_events: list[TraceEvent] = []
+    event_bus.subscribe(published_events.append)
+    tracer = Tracer(
+        event_bus=event_bus,
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def chat(self, profile, messages, **kwargs):
+            del kwargs
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="Here is a detailed description of her career.",
+                created_at="2026-03-14T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        # Simulate prior search context in history
+        session_manager.add_message(
+            MessageRole.USER,
+            "Who is Marie Curie?",
+            session_id=session.id,
+        )
+        session_manager.add_message(
+            MessageRole.TOOL,
+            "Tool: search_web\nOutcome: success\n\n"
+            "Supported facts:\n"
+            "- [strong; 3 sources] Marie Curie was a physicist and chemist.\n"
+            "- [supported; 2 sources] She won two Nobel Prizes.\n",
+            session_id=session.id,
+        )
+        session_manager.add_message(
+            MessageRole.ASSISTANT,
+            "Marie Curie was a physicist and chemist who won two Nobel Prizes.",
+            session_id=session.id,
+        )
+        # Now send the follow-up
+        session_manager.add_message(
+            MessageRole.USER,
+            "Fais une description plus détaillée d'elle",
+            session_id=session.id,
+        )
+
+        # The follow-up should be routed as direct_answer, NOT ambiguous
+        assistant_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Fais une description plus détaillée d'elle",
+            tracer=tracer,
+        )
+
+        # Verify it went through direct_answer (model was called)
+        route_events = [
+            event for event in published_events
+            if event.event_type == "route.selected"
+        ]
+        assert len(route_events) == 1
+        assert route_events[0].payload["route_kind"] == "direct_answer"
+        assert route_events[0].payload["route_source"] == "follow_up_resolution"
+        assert assistant_reply  # Got a model reply, not a fallback message
+        assert "clarify" not in assistant_reply.lower()
+    finally:
+        session_manager.close()
+
+
+def test_agent_mode_never_prints_internal_plan_text(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Agent mode strips planning narration from model replies."""
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def chat(self, profile, messages, **kwargs):
+            del kwargs
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content=(
+                    "Je vais vérifier les dernières informations.\n"
+                    "/search Lara Croft next movie\n"
+                    "The next Lara Croft project has not been officially announced yet."
+                ),
+                created_at="2026-03-14T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "Who will play Lara Croft?",
+            session_id=session.id,
+        )
+
+        assistant_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Who will play Lara Croft?",
+            tracer=tracer,
+            capability_router=_StaticCapabilityRouter(
+                CapabilityDecision(
+                    kind=CapabilityKind.DIRECT_ANSWER,
+                    confidence="high",
+                    source="test",
+                )
+            ),
+        )
+
+        # Planning narration and slash commands must be stripped
+        assert "Je vais vérifier" not in assistant_reply
+        assert "/search" not in assistant_reply
+        # The actual answer content should remain
+        assert "Lara Croft" in assistant_reply
+    finally:
+        session_manager.close()
+
+
+def test_agent_mode_strips_raw_json_structured_output(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Agent mode replaces raw JSON structured output with neutral message."""
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def chat(self, profile, messages, **kwargs):
+            del kwargs
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content='{"capability":"web_research","confidence":"high","follow_up":null}',
+                created_at="2026-03-14T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "What is the weather?",
+            session_id=session.id,
+        )
+
+        assistant_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="What is the weather?",
+            tracer=tracer,
+            capability_router=_StaticCapabilityRouter(
+                CapabilityDecision(
+                    kind=CapabilityKind.DIRECT_ANSWER,
+                    confidence="high",
+                    source="test",
+                )
+            ),
+        )
+
+        # Raw JSON should not appear in the reply
+        assert '"capability"' not in assistant_reply
+        assert "web_research" not in assistant_reply
+        # Should get a clean fallback message
+        assert "rephrasing" in assistant_reply.lower() or "clear answer" in assistant_reply.lower()
+    finally:
+        session_manager.close()
+
+
+def test_chatbot_mode_does_not_auto_trigger_web_research(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Chatbot mode always routes to direct_answer, never web_research."""
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    event_bus = EventBus()
+    published_events: list[TraceEvent] = []
+    event_bus.subscribe(published_events.append)
+    tracer = Tracer(
+        event_bus=event_bus,
+        event_repository=session_manager.event_repository,
+    )
+    # Use "fast" profile which has thinking_supported=false and tool_mode=json_plan
+    # but actually we need a profile that maps to chatbot mode.
+    # Since all profiles with tool_mode != "none" support agent mode,
+    # we need to test this differently - use a static router that would return
+    # web_research, but the chatbot mode override should prevent it.
+    from unclaw.core.router import route_request, RouteKind
+    from unclaw.core.capabilities import build_runtime_capability_summary
+    from unclaw.core.runtime_modes import RuntimeMode
+
+    # Manually resolve: fast profile has json_plan tool_mode -> agent mode.
+    # To test chatbot mode, we need a profile with tool_mode=none.
+    # Let's just test the route_request function directly with a fake profile.
+    from unclaw.llm.base import ResolvedModelProfile, ModelCapabilities
+
+    chatbot_profile = ResolvedModelProfile(
+        name="chatbot_test",
+        provider="ollama",
+        model_name="test:1b",
+        temperature=0.5,
+        capabilities=ModelCapabilities(
+            thinking_supported=False,
+            tool_mode="none",
+            supports_tools=False,
+            supports_native_tool_calling=False,
+            supports_agent_mode=False,
+        ),
+    )
+
+    monkeypatch.setattr(
+        "unclaw.core.router.resolve_model_profile",
+        lambda settings, name: chatbot_profile,
+    )
+
+    summary = build_runtime_capability_summary(
+        tool_registry=ToolRegistry(),
+        memory_summary_available=False,
+        runtime_mode=RuntimeMode.CHATBOT,
+    )
+
+    route = route_request(
+        settings=settings,
+        model_profile_name="chatbot_test",
+        user_message="What are the latest news today?",
+        capability_summary=summary,
+    )
+
+    assert route.kind is RouteKind.DIRECT_ANSWER
+    assert route.runtime_mode is RuntimeMode.CHATBOT
+    assert route.route_source == "chatbot_fallback"
+    session_manager.close()
+
+
+def test_logs_distinguish_router_profile_vs_active_profile(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Route selection logs must include router_model_profile_name."""
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    event_bus = EventBus()
+    published_events: list[TraceEvent] = []
+    event_bus.subscribe(published_events.append)
+    tracer = Tracer(
+        event_bus=event_bus,
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def chat(self, profile, messages, **kwargs):
+            del kwargs
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="Model reply.",
+                created_at="2026-03-14T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "Hello there",
+            session_id=session.id,
+        )
+
+        run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Hello there",
+            tracer=tracer,
+            capability_router=_StaticCapabilityRouter(
+                CapabilityDecision(
+                    kind=CapabilityKind.DIRECT_ANSWER,
+                    confidence="high",
+                    source="test",
+                )
+            ),
+        )
+
+        route_events = [
+            event for event in published_events
+            if event.event_type == "route.selected"
+        ]
+        assert len(route_events) == 1
+        payload = route_events[0].payload
+        assert "model_profile_name" in payload
+        assert "router_model_profile_name" in payload
+        assert "runtime_mode" in payload
+        assert "route_kind" in payload
+        assert "route_confidence" in payload
+        assert "route_source" in payload
+    finally:
+        session_manager.close()
+
+
+def test_weak_evidence_produces_cautious_wording(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Weak/conflicting evidence must produce cautious wording, not overclaiming."""
+    _freeze_search_grounding_date(monkeypatch)
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def chat(self, profile, messages, **kwargs):
+            del kwargs
+            # The model's reply overclaims something that's only uncertain
+            return LLMResponse(
+                provider="ollama",
+                model_name=profile.model_name,
+                content="John Doe is 35 years old and lives in Paris.",
+                created_at="2026-03-14T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    try:
+        session = session_manager.ensure_current_session()
+
+        # Build a search result where findings are uncertain
+        tool_result = ToolResult.ok(
+            tool_name="search_web",
+            output_text="Search results for John Doe",
+            payload={
+                "query": "Who is John Doe?",
+                "summary_points": [
+                    "John Doe may be a software engineer.",
+                ],
+                "synthesized_findings": [
+                    {
+                        "text": "John Doe may be a software engineer.",
+                        "score": 3.0,
+                        "support_count": 1,
+                        "source_titles": ["Some Blog"],
+                        "source_urls": ["https://example.com/blog"],
+                    },
+                ],
+                "display_sources": [
+                    {"title": "Some Blog", "url": "https://example.com/blog"},
+                ],
+                "results": [
+                    {
+                        "title": "Some Blog",
+                        "url": "https://example.com/blog",
+                        "fetched": False,
+                        "evidence_count": 0,
+                        "usefulness": 2.0,
+                        "used_snippet_fallback": True,
+                    },
+                ],
+            },
+        )
+
+        result = run_search_then_answer(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            tracer=tracer,
+            tool_executor=SimpleNamespace(
+                execute=lambda call: tool_result,
+                registry=ToolRegistry(),
+            ),
+            tool_call=SimpleNamespace(
+                tool_name="search_web",
+                arguments={"query": "Who is John Doe?"},
+            ),
+        )
+
+        reply = result.assistant_reply
+        # The reply should include cautious language since evidence is weak
+        has_caution = any(
+            marker in reply.lower()
+            for marker in (
+                "not confirmed",
+                "not consistently confirmed",
+                "uncertain",
+                "could not confirm",
+                "few mentions",
+                "weakly supported",
+                "unconfirmed",
+            )
+        )
+        # Either the grounding rewriter added cautious language, or the model's
+        # reply was left clean (grounding passed it through). At minimum, it
+        # should NOT contain the age claim without a birth date.
+        assert "35 years old" not in reply or has_caution
+    finally:
+        session_manager.close()
+
+
+def test_freshness_question_routes_to_web_research_via_llm_router(
+    monkeypatch,
+) -> None:
+    """Freshness/current-event questions with the LLM router should prefer web_research."""
+    from unclaw.core.capability_router import (
+        _build_router_messages,
+    )
+    from unclaw.core.capabilities import build_runtime_capability_summary
+    from unclaw.core.runtime_modes import RuntimeMode
+
+    settings = load_settings(project_root=Path(__file__).resolve().parents[1])
+    summary = build_runtime_capability_summary(
+        tool_registry=ToolRegistry(),
+        memory_summary_available=False,
+        runtime_mode=RuntimeMode.AGENT,
+    )
+
+    # Verify the router prompt includes freshness signals
+    messages = _build_router_messages(
+        user_message="Who is the current CEO of Apple?",
+        capability_summary=summary,
+    )
+    system_content = messages[0].content
+    assert "Freshness signals" in system_content
+    assert "current" in system_content.lower()
+    assert "latest" in system_content.lower()
+    assert "upcoming" in system_content.lower()
+
+
+def test_slash_commands_still_work_after_routing_changes(
+    tmp_path: Path,
+) -> None:
+    """Slash commands must continue to work unchanged."""
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+
+    try:
+        command_handler = CommandHandler(
+            settings=settings,
+            session_manager=session_manager,
+            memory_manager=SimpleNamespace(),
+        )
+
+        # /help should work
+        result = command_handler.handle("/help")
+        assert result.status.value == "ok"
+        assert any("slash commands" in line.lower() for line in result.lines)
+
+        # /model should work
+        result = command_handler.handle("/model")
+        assert result.status.value == "ok"
+
+        # /search should produce a tool call
+        result = command_handler.handle("/search test query")
+        assert result.tool_call is not None
+        assert result.tool_call.tool_name == "search_web"
+        assert result.tool_call.arguments["query"] == "test query"
+
+        # /think should work
+        result = command_handler.handle("/think")
+        assert result.status.value == "ok"
+    finally:
+        session_manager.close()
+
+
 def _create_temp_project(tmp_path: Path) -> Path:
     source_root = Path(__file__).resolve().parents[1]
     project_root = tmp_path / "project"

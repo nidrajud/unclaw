@@ -134,6 +134,10 @@ def build_search_answer_contract(*, current_date: date | None = None) -> str:
                 "label it clearly as unconfirmed."
             ),
             (
+                "- If the evidence is weak, contradictory, or not clearly confirmed, "
+                "say so explicitly. Do not overclaim or invent facts."
+            ),
+            (
                 "- Do not invent relative date framing such as `as of May 2024` or "
                 "similar stale anchors."
             ),
@@ -151,6 +155,10 @@ def build_search_answer_contract(*, current_date: date | None = None) -> str:
                 "a concrete fact supported by the retrieved sources."
             ),
             "- Keep the answer natural prose. Do not dump raw tool output.",
+            (
+                "- Never expose internal planning, tool commands, or routing "
+                "mechanics in your reply. Answer directly and naturally."
+            ),
         )
     )
 

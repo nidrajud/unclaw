@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -13,6 +14,7 @@ from unclaw.core.capability_router import (
 from unclaw.core.capabilities import RuntimeCapabilitySummary
 from unclaw.core.runtime_modes import RuntimeMode, RuntimeModeDecision, resolve_runtime_mode
 from unclaw.llm.model_profiles import resolve_model_profile
+from unclaw.schemas.chat import ChatMessage
 from unclaw.settings import Settings
 
 
@@ -33,6 +35,7 @@ class RouteDecision:
     kind: RouteKind
     runtime_mode: RuntimeMode
     model_profile_name: str
+    router_model_profile_name: str | None = None
     warning_message: str | None = None
     follow_up_message: str | None = None
     route_source: str = "direct"
@@ -46,6 +49,7 @@ def route_request(
     user_message: str,
     capability_summary: RuntimeCapabilitySummary,
     capability_router: CapabilityRouter | None = None,
+    recent_history: Sequence[ChatMessage] = (),
 ) -> RouteDecision:
     """Resolve runtime mode, then select the bounded capability path for one turn."""
     profile = resolve_model_profile(settings, model_profile_name)
@@ -66,12 +70,14 @@ def route_request(
         profile=profile,
         user_message=user_message,
         capability_summary=capability_summary,
+        recent_history=recent_history,
     )
 
     return RouteDecision(
         kind=RouteKind(capability_decision.kind.value),
         runtime_mode=runtime_mode.mode,
         model_profile_name=model_profile_name,
+        router_model_profile_name=model_profile_name,
         follow_up_message=capability_decision.follow_up_message,
         route_source=capability_decision.source,
         route_confidence=capability_decision.confidence,

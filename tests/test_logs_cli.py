@@ -344,6 +344,30 @@ def test_run_logs_full_shows_reasoning_text_when_opted_in(tmp_path: Path) -> Non
     assert any('"reasoning_text": "chain"' in line for line in outputs)
 
 
+def test_route_selected_log_shows_confidence_and_router_profile() -> None:
+    """Route selected log line must include confidence, source, and router profile."""
+    line = _runtime_event_line(
+        event_type="route.selected",
+        message="Runtime route selected.",
+        payload={
+            "route_kind": "web_research",
+            "model_profile_name": "main",
+            "router_model_profile_name": "main",
+            "runtime_mode": "agent",
+            "route_confidence": "high",
+            "route_source": "llm_router",
+        },
+    )
+    rendered = render_simple_log_line(line)
+    assert rendered is not None
+    assert "web_research" in rendered
+    assert "mode=agent" in rendered
+    assert "profile=main" in rendered
+    assert "router_profile=main" in rendered
+    assert "confidence=high" in rendered
+    assert "source=llm_router" in rendered
+
+
 def _create_temp_project(tmp_path: Path) -> Path:
     source_root = Path(__file__).resolve().parents[1]
     project_root = tmp_path / "project"

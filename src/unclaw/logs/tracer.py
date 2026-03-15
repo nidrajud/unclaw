@@ -175,6 +175,7 @@ class Tracer:
         session_id: str,
         route_kind: str,
         model_profile_name: str,
+        router_model_profile_name: str | None = None,
         runtime_mode: str | None = None,
         route_source: str | None = None,
         route_confidence: str | None = None,
@@ -183,6 +184,8 @@ class Tracer:
             "route_kind": route_kind,
             "model_profile_name": model_profile_name,
         }
+        if router_model_profile_name is not None:
+            payload["router_model_profile_name"] = router_model_profile_name
         if runtime_mode is not None:
             payload["runtime_mode"] = runtime_mode
         if route_source is not None:
