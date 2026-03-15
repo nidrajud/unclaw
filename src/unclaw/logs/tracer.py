@@ -147,6 +147,7 @@ class Tracer:
         model_name: str | None = None,
         thinking_enabled: bool,
         input_length: int,
+        runtime_mode: str | None = None,
     ) -> None:
         payload: dict[str, Any] = {
             "model_profile_name": model_profile_name,
@@ -157,6 +158,8 @@ class Tracer:
             payload["provider"] = provider
         if model_name is not None:
             payload["model_name"] = model_name
+        if runtime_mode is not None:
+            payload["runtime_mode"] = runtime_mode
 
         self._emit(
             session_id=session_id,
@@ -172,16 +175,27 @@ class Tracer:
         session_id: str,
         route_kind: str,
         model_profile_name: str,
+        runtime_mode: str | None = None,
+        route_source: str | None = None,
+        route_confidence: str | None = None,
     ) -> None:
+        payload: dict[str, Any] = {
+            "route_kind": route_kind,
+            "model_profile_name": model_profile_name,
+        }
+        if runtime_mode is not None:
+            payload["runtime_mode"] = runtime_mode
+        if route_source is not None:
+            payload["route_source"] = route_source
+        if route_confidence is not None:
+            payload["route_confidence"] = route_confidence
+
         self._emit(
             session_id=session_id,
             event_type="route.selected",
             level=EventLevel.INFO,
             message="Runtime route selected.",
-            payload={
-                "route_kind": route_kind,
-                "model_profile_name": model_profile_name,
-            },
+            payload=payload,
         )
 
     def trace_model_called(

@@ -36,6 +36,7 @@ def test_run_logs_defaults_to_simple_live_view_when_follow_is_disabled(
                         "model_profile_name": "main",
                         "model_name": "qwen3.5:4b",
                         "provider": "ollama",
+                        "runtime_mode": "agent",
                         "thinking_enabled": False,
                     },
                     session_id="sess-1",
@@ -44,8 +45,9 @@ def test_run_logs_defaults_to_simple_live_view_when_follow_is_disabled(
                     event_type="route.selected",
                     message="Runtime route selected.",
                     payload={
-                        "route_kind": "chat",
+                        "route_kind": "direct_answer",
                         "model_profile_name": "main",
+                        "runtime_mode": "agent",
                     },
                     session_id="sess-1",
                 ),
@@ -93,11 +95,14 @@ def test_run_logs_defaults_to_simple_live_view_when_follow_is_disabled(
     assert "Recent activity:" in outputs
     assert any("model selected | main -> qwen3.5:4b | provider=ollama" in line for line in outputs)
     assert any(
-        "assistant turn started | session=sess-1 | profile=main | model=ollama/qwen3.5:4b | thinking=off"
+        "assistant turn started | session=sess-1 | profile=main | mode=agent | model=ollama/qwen3.5:4b | thinking=off"
         in line
         for line in outputs
     )
-    assert any("route selected | chat | profile=main" in line for line in outputs)
+    assert any(
+        "route selected | direct_answer | mode=agent | profile=main" in line
+        for line in outputs
+    )
     assert any(
         "model reply | model=ollama/qwen3.5:4b | chars=84 | duration=842 ms | reasoning=19 chars"
         in line

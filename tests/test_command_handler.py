@@ -94,6 +94,7 @@ def test_switching_to_fast_turns_thinking_off_cleanly() -> None:
     assert result.status is CommandStatus.OK
     assert handler.current_model_profile_name == "fast"
     assert handler.thinking_enabled is False
+    assert "Runtime mode: Agent mode" in result.lines
     assert (
         "Thinking mode was turned off because fast mode does not support thinking."
         in result.lines
@@ -150,6 +151,7 @@ def test_switching_back_to_supported_model_keeps_thinking_off() -> None:
     assert result.status is CommandStatus.OK
     assert handler.current_model_profile_name == "main"
     assert handler.thinking_enabled is False
+    assert "Runtime mode: Agent mode" in result.lines
 
 
 def test_ls_defaults_to_current_directory_when_no_path_is_given() -> None:
@@ -228,4 +230,34 @@ def _with_default_fast_and_thinking_enabled(settings):
             default_model_profile="fast",
             thinking=replace(settings.app.thinking, default_enabled=True),
         ),
+    )
+
+
+def test_model_reports_chatbot_mode_and_warning_for_profiles_without_agent_support() -> None:
+    settings = replace(
+        _load_repo_settings(),
+        models={
+            **_load_repo_settings().models,
+            "chatonly": replace(
+                _load_repo_settings().models["main"],
+                name="chatonly",
+                tool_mode="none",
+            ),
+        },
+    )
+    handler = CommandHandler(
+        settings=settings,
+        session_manager=_build_session_manager(),
+        current_model_profile_name="chatonly",
+    )
+
+    result = handler.handle("/model")
+
+    assert result.status is CommandStatus.OK
+    assert "Runtime mode: Chatbot mode" in result.lines
+    assert (
+        "Please note: the selected model profile does not support tools reliably. "
+        "Unclaw will switch to Chatbot mode. "
+        "Chatbot mode = simple conversation, no web research, no automation."
+        in result.lines
     )

@@ -494,6 +494,7 @@ class TelegramBotChannel:
             command_handler=command_handler,
             user_input=text,
             tracer=self.tracer,
+            tool_executor=self.tool_executor,
         )
         _refresh_memory_summary(
             memory_manager=self.memory_manager,

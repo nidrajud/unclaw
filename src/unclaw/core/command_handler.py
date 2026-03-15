@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from shlex import split as shlex_split
 from typing import TYPE_CHECKING
 
 from unclaw.core.executor import resolve_builtin_tool_command
+from unclaw.core.runtime_modes import format_runtime_mode, resolve_runtime_mode
 from unclaw.core.session_manager import SessionManager, SessionManagerError
+from unclaw.llm.model_profiles import resolve_model_profile
 from unclaw.schemas.session import SessionSummary
 from unclaw.settings import ModelProfile, Settings
 from unclaw.tools.contracts import ToolCall
@@ -63,6 +65,11 @@ class CommandHandler:
     current_model_profile_name: str | None = None
     thinking_enabled: bool | None = None
     allow_exit: bool = True
+    _last_runtime_mode_warning_profile_name: str | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         if self.current_model_profile_name is None:
@@ -90,6 +97,30 @@ class CommandHandler:
     @property
     def thinking_label(self) -> str:
         return "on" if self.thinking_enabled else "off"
+
+    def current_runtime_mode_label(self) -> str:
+        return format_runtime_mode(self.current_runtime_mode_decision().mode)
+
+    def current_runtime_mode_decision(self):
+        return resolve_runtime_mode(
+            resolve_model_profile(
+                self.settings,
+                self.current_model_profile.name,
+            )
+        )
+
+    def consume_runtime_mode_warning(self) -> str | None:
+        decision = self.current_runtime_mode_decision()
+        if decision.warning_message is None:
+            self._last_runtime_mode_warning_profile_name = None
+            return None
+
+        profile_name = self.current_model_profile.name
+        if self._last_runtime_mode_warning_profile_name == profile_name:
+            return None
+
+        self._last_runtime_mode_warning_profile_name = profile_name
+        return decision.warning_message
 
     def handle(self, raw_command: str) -> CommandResult:
         """Parse one slash command and return a structured result."""
@@ -223,9 +254,12 @@ class CommandHandler:
     def _handle_model(self, arguments: tuple[str, ...]) -> CommandResult:
         if not arguments:
             profile = self.current_model_profile
+            runtime_mode_decision = self.current_runtime_mode_decision()
             return self._ok(
                 f"Current model profile: {profile.name}",
                 f"Provider: {profile.provider} | Model: {profile.model_name}",
+                f"Runtime mode: {format_runtime_mode(runtime_mode_decision.mode)}",
+                *self._runtime_mode_warning_lines(runtime_mode_decision),
             )
 
         if len(arguments) != 1:
@@ -250,6 +284,10 @@ class CommandHandler:
             self.thinking_enabled = False
             lines.append(self._thinking_disabled_reason())
             self._trace_thinking_changed(reason=self._thinking_disabled_reason())
+
+        runtime_mode_decision = self.current_runtime_mode_decision()
+        lines.append(f"Runtime mode: {format_runtime_mode(runtime_mode_decision.mode)}")
+        lines.extend(self._runtime_mode_warning_lines(runtime_mode_decision))
 
         return self._ok(*lines)
 
@@ -458,6 +496,15 @@ class CommandHandler:
 
     def _usage(self, usage_line: str) -> CommandResult:
         return self._error(f"Usage: {usage_line}")
+
+    def _runtime_mode_warning_lines(self, runtime_mode_decision) -> tuple[str, ...]:
+        warning_message = runtime_mode_decision.warning_message
+        if warning_message is None:
+            self._last_runtime_mode_warning_profile_name = None
+            return ()
+
+        self._last_runtime_mode_warning_profile_name = self.current_model_profile.name
+        return (warning_message,)
 
     def _thinking_disabled_reason(self) -> str:
         profile = self.current_model_profile

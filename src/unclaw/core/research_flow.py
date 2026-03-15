@@ -8,14 +8,11 @@ from datetime import date
 from time import perf_counter
 from typing import Any
 
+from unclaw.constants import EMPTY_RESPONSE_REPLY, RUNTIME_ERROR_REPLY
+from unclaw.core.chat_flow import run_direct_chat_turn
 from unclaw.core.search_grounding import (
     build_search_tool_history_summary,
     shape_search_backed_reply,
-)
-from unclaw.core.runtime import (
-    _EMPTY_RESPONSE_REPLY,
-    _RUNTIME_ERROR_REPLY,
-    run_user_turn,
 )
 from unclaw.schemas.chat import MessageRole
 from unclaw.tools.contracts import ToolCall, ToolResult
@@ -91,15 +88,18 @@ def run_search_then_answer(
     tracer: Any,
     tool_executor: Any,
     tool_call: ToolCall,
+    persist_user_message: bool = True,
+    assistant_reply_transform: Any = None,
 ) -> ResearchTurnResult:
     """Execute bounded web retrieval, persist it as tool context, then answer naturally."""
     query = _read_tool_call_query(tool_call)
     session = session_manager.ensure_current_session()
-    session_manager.add_message(
-        MessageRole.USER,
-        query,
-        session_id=session.id,
-    )
+    if persist_user_message:
+        session_manager.add_message(
+            MessageRole.USER,
+            query,
+            session_id=session.id,
+        )
 
     tracer.trace_tool_started(
         session_id=session.id,
@@ -138,20 +138,23 @@ def run_search_then_answer(
             tool_result=tool_result,
         )
 
-    assistant_reply = run_user_turn(
+    assistant_reply = run_direct_chat_turn(
         session_manager=session_manager,
         command_handler=command_handler,
         user_input=query,
         tracer=tracer,
         tool_registry=getattr(tool_executor, "registry", None),
-        assistant_reply_transform=lambda reply: append_search_sources_section(
-            shape_search_backed_reply(
-                reply,
+        assistant_reply_transform=_compose_reply_transforms(
+            lambda reply: append_search_sources_section(
+                shape_search_backed_reply(
+                    reply,
+                    payload=tool_result.payload,
+                    query=query,
+                    current_date=date.today(),
+                ),
                 payload=tool_result.payload,
-                query=query,
-                current_date=date.today(),
             ),
-            payload=tool_result.payload,
+            assistant_reply_transform,
         ),
     )
     return ResearchTurnResult(
@@ -166,7 +169,7 @@ def append_search_sources_section(
     payload: Mapping[str, Any] | None,
 ) -> str:
     """Append a compact sources section to a natural-language reply."""
-    if reply_text in {_RUNTIME_ERROR_REPLY, _EMPTY_RESPONSE_REPLY}:
+    if reply_text in {RUNTIME_ERROR_REPLY, EMPTY_RESPONSE_REPLY}:
         return reply_text
 
     sources = _extract_search_sources(payload)
@@ -321,3 +324,17 @@ def _read_string_list(value: Any) -> tuple[str, ...]:
 
 def _elapsed_ms(started_at: float) -> int:
     return max(0, round((perf_counter() - started_at) * 1000))
+
+
+def _compose_reply_transforms(*transforms: Any) -> Any:
+    active_transforms = tuple(transform for transform in transforms if transform is not None)
+    if not active_transforms:
+        return None
+
+    def apply(reply_text: str) -> str:
+        updated_reply = reply_text
+        for transform in active_transforms:
+            updated_reply = transform(updated_reply)
+        return updated_reply
+
+    return apply

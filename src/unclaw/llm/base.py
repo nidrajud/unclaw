@@ -73,6 +73,7 @@ class ModelCapabilities:
     tool_mode: str
     supports_tools: bool
     supports_native_tool_calling: bool
+    supports_agent_mode: bool
     supports_streaming: bool = False
     supports_vision: bool = False
 

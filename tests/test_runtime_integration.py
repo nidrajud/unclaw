@@ -11,9 +11,11 @@ from unclaw.core.capabilities import (
     build_runtime_capability_context,
     build_runtime_capability_summary,
 )
+from unclaw.core.capability_router import CapabilityDecision, CapabilityKind
 from unclaw.core.command_handler import CommandHandler
 from unclaw.core.research_flow import build_tool_history_content, run_search_then_answer
 from unclaw.core.runtime import run_user_turn
+from unclaw.core.runtime_modes import RuntimeMode
 from unclaw.core.session_manager import SessionManager
 from unclaw.llm.base import LLMMessage, LLMResponse, LLMRole
 from unclaw.logs.event_bus import EventBus
@@ -23,6 +25,15 @@ from unclaw.settings import load_settings
 from unclaw.tools.contracts import ToolResult
 from unclaw.tools.registry import ToolRegistry
 from unclaw.tools.web_tools import FETCH_URL_TEXT_DEFINITION
+
+
+class _StaticCapabilityRouter:
+    def __init__(self, decision: CapabilityDecision) -> None:
+        self.decision = decision
+
+    def route(self, **kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        return self.decision
 
 
 def test_run_user_turn_persists_reply_and_emits_runtime_events(
@@ -103,6 +114,13 @@ def test_run_user_turn_persists_reply_and_emits_runtime_events(
             user_input="Summarize this test run.",
             tracer=tracer,
             stream_output_func=streamed_chunks.append,
+            capability_router=_StaticCapabilityRouter(
+                CapabilityDecision(
+                    kind=CapabilityKind.DIRECT_ANSWER,
+                    confidence="high",
+                    source="test",
+                )
+            ),
         )
 
         assert assistant_reply == "Local reply"
@@ -157,6 +175,273 @@ def test_run_user_turn_persists_reply_and_emits_runtime_events(
         session_manager.close()
 
 
+def test_run_user_turn_routes_agent_mode_web_research_through_search_flow(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        memory_manager=SimpleNamespace(),
+    )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+        ):
+            del profile, messages, timeout_seconds, thinking_enabled, content_callback
+            return LLMResponse(
+                provider="ollama",
+                model_name="qwen3.5:4b",
+                content="Ollama shipped a new update with improved search grounding.",
+                created_at="2026-03-13T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    search_tool_calls: list[object] = []
+    search_tool_result = ToolResult.ok(
+        tool_name="search_web",
+        output_text=(
+            "Search query: latest news about Ollama\n"
+            "Sources fetched: 2 of 2 attempted\n"
+            "Evidence kept: 4\n"
+        ),
+        payload={
+            "query": "latest news about Ollama",
+            "summary_points": [
+                "Ollama shipped a new update with improved search grounding."
+            ],
+            "display_sources": [
+                {
+                    "title": "Ollama Blog",
+                    "url": "https://ollama.com/blog/search-update",
+                },
+            ],
+        },
+    )
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "latest news about Ollama",
+            session_id=session.id,
+        )
+
+        assistant_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="latest news about Ollama",
+            tracer=tracer,
+            tool_executor=SimpleNamespace(
+                execute=lambda tool_call: (
+                    search_tool_calls.append(tool_call) or search_tool_result
+                ),
+                registry=ToolRegistry(),
+            ),
+            capability_router=_StaticCapabilityRouter(
+                CapabilityDecision(
+                    kind=CapabilityKind.WEB_RESEARCH,
+                    confidence="high",
+                    source="test",
+                )
+            ),
+        )
+
+        assert assistant_reply == (
+            "Ollama shipped a new update with improved search grounding.\n\n"
+            "Sources:\n"
+            "- Ollama Blog: https://ollama.com/blog/search-update"
+        )
+        assert len(search_tool_calls) == 1
+        assert search_tool_calls[0].tool_name == "search_web"
+        assert search_tool_calls[0].arguments == {"query": "latest news about Ollama"}
+
+        stored_messages = session_manager.list_messages(session.id)
+        assert [message.role for message in stored_messages] == [
+            MessageRole.USER,
+            MessageRole.TOOL,
+            MessageRole.ASSISTANT,
+        ]
+        assert "Grounding rules:" in stored_messages[1].content
+    finally:
+        session_manager.close()
+
+
+def test_run_user_turn_falls_back_to_chatbot_mode_with_warning_and_skips_autonomous_search(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    models_config_path = project_root / "config" / "models.yaml"
+    models_payload = yaml.safe_load(models_config_path.read_text(encoding="utf-8"))
+    assert isinstance(models_payload, dict)
+    profiles_payload = models_payload["profiles"]
+    assert isinstance(profiles_payload, dict)
+    profiles_payload["chatonly"] = dict(profiles_payload["main"])
+    profiles_payload["chatonly"]["tool_mode"] = "none"
+    models_config_path.write_text(
+        yaml.safe_dump(models_payload, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+        current_model_profile_name="chatonly",
+    )
+
+    class FakeOllamaProvider:
+        provider_name = "ollama"
+
+        def __init__(
+            self,
+            *,
+            base_url: str = "http://127.0.0.1:11434",
+            default_timeout_seconds: float = 60.0,
+        ) -> None:
+            del base_url, default_timeout_seconds
+
+        def chat(  # type: ignore[no-untyped-def]
+            self,
+            profile,
+            messages,
+            *,
+            timeout_seconds=None,
+            thinking_enabled=False,
+            content_callback=None,
+        ):
+            del profile, messages, timeout_seconds, thinking_enabled, content_callback
+            return LLMResponse(
+                provider="ollama",
+                model_name="qwen3.5:4b",
+                content="I can still answer directly in chatbot mode.",
+                created_at="2026-03-13T12:00:00Z",
+                finish_reason="stop",
+            )
+
+    monkeypatch.setattr("unclaw.core.orchestrator.OllamaProvider", FakeOllamaProvider)
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "latest news about Ollama",
+            session_id=session.id,
+        )
+
+        assistant_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="latest news about Ollama",
+            tracer=tracer,
+            tool_executor=SimpleNamespace(
+                execute=lambda tool_call: (_raise_unexpected_tool_call(tool_call)),
+                registry=ToolRegistry(),
+            ),
+            capability_router=SimpleNamespace(
+                route=lambda **kwargs: (_raise_unexpected_router_call(kwargs))
+            ),
+        )
+
+        assert assistant_reply == (
+            "Please note: the selected model profile does not support tools reliably. "
+            "Unclaw will switch to Chatbot mode. "
+            "Chatbot mode = simple conversation, no web research, no automation.\n\n"
+            "I can still answer directly in chatbot mode."
+        )
+        stored_messages = session_manager.list_messages(session.id)
+        assert stored_messages[-1].content == assistant_reply
+    finally:
+        session_manager.close()
+
+
+def test_run_user_turn_returns_local_file_follow_up_without_web_execution(
+    tmp_path: Path,
+) -> None:
+    project_root = _create_temp_project(tmp_path)
+    settings = load_settings(project_root=project_root)
+    session_manager = SessionManager.from_settings(settings)
+    tracer = Tracer(
+        event_bus=EventBus(),
+        event_repository=session_manager.event_repository,
+    )
+    command_handler = CommandHandler(
+        settings=settings,
+        session_manager=session_manager,
+    )
+
+    try:
+        session = session_manager.ensure_current_session()
+        session_manager.add_message(
+            MessageRole.USER,
+            "Please inspect README.md in this repo.",
+            session_id=session.id,
+        )
+
+        assistant_reply = run_user_turn(
+            session_manager=session_manager,
+            command_handler=command_handler,
+            user_input="Please inspect README.md in this repo.",
+            tracer=tracer,
+            tool_executor=SimpleNamespace(
+                execute=lambda tool_call: (_raise_unexpected_tool_call(tool_call)),
+                registry=ToolRegistry(),
+            ),
+            capability_router=_StaticCapabilityRouter(
+                CapabilityDecision(
+                    kind=CapabilityKind.LOCAL_FILE_INTENT,
+                    confidence="high",
+                    source="test",
+                    follow_up_message=(
+                        "Which local file should I inspect? "
+                        "You can also use /read <path>."
+                    ),
+                )
+            ),
+        )
+
+        assert assistant_reply == (
+            "Which local file should I inspect? You can also use /read <path>."
+        )
+        stored_messages = session_manager.list_messages(session.id)
+        assert stored_messages[-1].role is MessageRole.ASSISTANT
+        assert stored_messages[-1].content == assistant_reply
+    finally:
+        session_manager.close()
+
+
 def test_runtime_capability_summary_reports_available_and_missing_capabilities() -> None:
     registry = ToolRegistry()
     registry.register(
@@ -167,16 +452,19 @@ def test_runtime_capability_summary_reports_available_and_missing_capabilities()
     summary = build_runtime_capability_summary(
         tool_registry=registry,
         memory_summary_available=False,
+        runtime_mode=RuntimeMode.AGENT,
     )
     context = build_runtime_capability_context(summary)
 
     assert summary.enabled_builtin_tool_count == 1
+    assert summary.runtime_mode is RuntimeMode.AGENT
     assert summary.url_fetch_available is True
     assert summary.web_search_available is False
     assert summary.local_file_read_available is False
     assert summary.local_directory_listing_available is False
     assert summary.memory_summary_available is False
     assert "Available built-in tools:" in context
+    assert "Runtime mode: Agent mode" in context
     assert "/fetch <url>: fetch one public URL and extract text." in context
     assert "Web search via /search <query>." in context
     assert "Session memory and summary access." in context
@@ -259,6 +547,13 @@ def test_run_user_turn_includes_prior_tool_output_for_follow_up_questions(
             command_handler=command_handler,
             user_input="Summarize that more briefly.",
             tracer=tracer,
+            capability_router=_StaticCapabilityRouter(
+                CapabilityDecision(
+                    kind=CapabilityKind.DIRECT_ANSWER,
+                    confidence="high",
+                    source="test",
+                )
+            ),
         )
 
         assert assistant_reply == "Shorter recap."
@@ -422,6 +717,13 @@ def test_run_search_then_answer_grounds_a_natural_reply_and_preserves_follow_up_
             command_handler=command_handler,
             user_input="Summarize that more briefly.",
             tracer=tracer,
+            capability_router=_StaticCapabilityRouter(
+                CapabilityDecision(
+                    kind=CapabilityKind.DIRECT_ANSWER,
+                    confidence="high",
+                    source="test",
+                )
+            ),
         )
 
         assert follow_up_reply == "Shorter recap."
@@ -1162,6 +1464,13 @@ def test_run_user_turn_keeps_follow_up_turns_grounded_after_search(
             command_handler=command_handler,
             user_input="Summarize that more briefly.",
             tracer=tracer,
+            capability_router=_StaticCapabilityRouter(
+                CapabilityDecision(
+                    kind=CapabilityKind.DIRECT_ANSWER,
+                    confidence="high",
+                    source="test",
+                )
+            ),
         )
 
         assert assistant_reply == (
@@ -1255,6 +1564,13 @@ def test_run_user_turn_uses_configured_ollama_timeout(
             command_handler=command_handler,
             user_input="Check timeout wiring.",
             tracer=tracer,
+            capability_router=_StaticCapabilityRouter(
+                CapabilityDecision(
+                    kind=CapabilityKind.DIRECT_ANSWER,
+                    confidence="high",
+                    source="test",
+                )
+            ),
         )
 
         assert assistant_reply == "Timed reply"
@@ -1280,3 +1596,11 @@ def _freeze_search_grounding_date(monkeypatch) -> None:
     monkeypatch.setattr("unclaw.core.context_builder.date", FixedDate)
     monkeypatch.setattr("unclaw.core.research_flow.date", FixedDate)
     monkeypatch.setattr("unclaw.core.search_grounding.date", FixedDate)
+
+
+def _raise_unexpected_tool_call(tool_call):
+    raise AssertionError(f"Unexpected tool call: {tool_call}")
+
+
+def _raise_unexpected_router_call(payload):
+    raise AssertionError(f"Unexpected capability router call: {payload}")

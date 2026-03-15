@@ -150,6 +150,7 @@ def _build_profile(
             tool_mode="json_plan",
             supports_tools=True,
             supports_native_tool_calling=False,
+            supports_agent_mode=True,
         ),
     )
 

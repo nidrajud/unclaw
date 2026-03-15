@@ -1,53 +1,86 @@
-"""Minimal rule-based routing for the current runtime phase."""
+"""Top-level routing between explicit runtime modes and capabilities."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
 
-from unclaw.errors import ConfigurationError
+from unclaw.core.capability_router import (
+    CapabilityKind,
+    CapabilityRouter,
+    LLMCapabilityRouter,
+)
+from unclaw.core.capabilities import RuntimeCapabilitySummary
+from unclaw.core.runtime_modes import RuntimeMode, RuntimeModeDecision, resolve_runtime_mode
+from unclaw.llm.model_profiles import resolve_model_profile
 from unclaw.settings import Settings
 
 
 class RouteKind(StrEnum):
-    """Supported runtime routes for the current phase."""
+    """Supported runtime routes for Block B."""
 
-    COMMAND = "command"
-    CHAT = "chat"
-    CHAT_WITH_THINKING = "chat_with_thinking"
+    DIRECT_ANSWER = CapabilityKind.DIRECT_ANSWER.value
+    WEB_RESEARCH = CapabilityKind.WEB_RESEARCH.value
+    LOCAL_FILE_INTENT = CapabilityKind.LOCAL_FILE_INTENT.value
+    AMBIGUOUS = CapabilityKind.AMBIGUOUS.value
+    AUTOMATION_INTENT = CapabilityKind.AUTOMATION_INTENT.value
 
 
 @dataclass(frozen=True, slots=True)
 class RouteDecision:
-    """Result returned by the current lightweight router."""
+    """Result returned by the current capability-aware router."""
 
     kind: RouteKind
+    runtime_mode: RuntimeMode
     model_profile_name: str
+    warning_message: str | None = None
+    follow_up_message: str | None = None
+    route_source: str = "direct"
+    route_confidence: str = "high"
 
 
 def route_request(
     *,
     settings: Settings,
     model_profile_name: str,
-    thinking_enabled: bool,
-    is_command: bool = False,
+    user_message: str,
+    capability_summary: RuntimeCapabilitySummary,
+    capability_router: CapabilityRouter | None = None,
 ) -> RouteDecision:
-    """Select the current route with simple deterministic rules."""
-    profile = settings.models.get(model_profile_name)
-    if profile is None:
-        raise ConfigurationError(
-            f"Model profile '{model_profile_name}' is not defined in settings."
+    """Resolve runtime mode, then select the bounded capability path for one turn."""
+    profile = resolve_model_profile(settings, model_profile_name)
+    runtime_mode = resolve_runtime_mode(profile)
+    if runtime_mode.mode is RuntimeMode.CHATBOT:
+        return RouteDecision(
+            kind=RouteKind.DIRECT_ANSWER,
+            runtime_mode=runtime_mode.mode,
+            model_profile_name=model_profile_name,
+            warning_message=runtime_mode.warning_message,
+            route_source="chatbot_fallback",
+            route_confidence="high",
         )
 
-    if is_command:
-        route_kind = RouteKind.COMMAND
-    elif thinking_enabled and profile.thinking_supported:
-        route_kind = RouteKind.CHAT_WITH_THINKING
-    else:
-        route_kind = RouteKind.CHAT
+    active_capability_router = capability_router or LLMCapabilityRouter()
+    capability_decision = active_capability_router.route(
+        settings=settings,
+        profile=profile,
+        user_message=user_message,
+        capability_summary=capability_summary,
+    )
 
     return RouteDecision(
-        kind=route_kind,
+        kind=RouteKind(capability_decision.kind.value),
+        runtime_mode=runtime_mode.mode,
         model_profile_name=model_profile_name,
+        follow_up_message=capability_decision.follow_up_message,
+        route_source=capability_decision.source,
+        route_confidence=capability_decision.confidence,
     )
+
+
+__all__ = [
+    "RouteDecision",
+    "RouteKind",
+    "route_request",
+]
 

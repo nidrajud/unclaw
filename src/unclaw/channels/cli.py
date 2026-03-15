@@ -233,6 +233,7 @@ def run_cli(
             user_input=stripped_input,
             tracer=tracer,
             stream_output_func=assistant_stream.write,
+            tool_executor=tool_executor,
         )
         assistant_stream.finish(assistant_reply)
         _refresh_session_summary(

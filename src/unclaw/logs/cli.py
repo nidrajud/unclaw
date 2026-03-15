@@ -275,16 +275,21 @@ def render_simple_log_line(raw_line: str) -> str | None:
                 f"session={event.session_id}",
                 f"profile={payload.get('model_profile_name', '?')}",
             ]
+            runtime_mode = payload.get("runtime_mode")
+            if isinstance(runtime_mode, str) and runtime_mode:
+                details.append(f"mode={runtime_mode}")
             provider_model = _format_provider_model(payload)
             if provider_model is not None:
                 details.append(f"model={provider_model}")
             details.append(f"thinking={thinking_label}")
             return f"[{timestamp}] assistant turn started | {' | '.join(details)}"
         case "route.selected":
-            return (
-                f"[{timestamp}] route selected | "
-                f"{payload.get('route_kind', '?')} | profile={payload.get('model_profile_name', '?')}"
-            )
+            details = [str(payload.get("route_kind", "?"))]
+            runtime_mode = payload.get("runtime_mode")
+            if isinstance(runtime_mode, str) and runtime_mode:
+                details.append(f"mode={runtime_mode}")
+            details.append(f"profile={payload.get('model_profile_name', '?')}")
+            return f"[{timestamp}] route selected | {' | '.join(details)}"
         case "model.succeeded":
             details = [
                 f"model={_format_provider_model(payload) or '?'}",

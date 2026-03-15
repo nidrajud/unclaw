@@ -46,4 +46,5 @@ def _derive_capabilities(profile: ModelProfile) -> ModelCapabilities:
         tool_mode=profile.tool_mode,
         supports_tools=supports_tools,
         supports_native_tool_calling=tool_mode_normalized == "native",
+        supports_agent_mode=supports_tools,
     )
